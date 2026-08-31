@@ -48,7 +48,9 @@ jobs:
             runner: macos-latest
             marker: macos_only
           - name: Windows-only tests
-            runner: windows-latest-32-core
+            # The Lazurio release mirror has standard GitHub-hosted runners;
+            # upstream keeps its organization-scoped larger runner.
+            runner: ${{ github.repository == 'Lazurio/hermes-agent' && 'windows-latest' || 'windows-latest-32-core' }}
             marker: windows_only
     steps:
       - name: Checkout code

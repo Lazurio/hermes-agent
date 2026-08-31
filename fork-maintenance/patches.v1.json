@@ -27,15 +27,20 @@
       "id": "fork-maintenance-contract",
       "status": "active",
       "runtime_delta": false,
-      "upstream_gap": "The upstream contributor-attribution gate assumes an active multi-contributor development repository; this fork is a single-maintainer release mirror and instead needs release provenance plus overlay accountability.",
+      "upstream_gap": "The upstream CI assumes an active multi-contributor development repository with NousResearch-owned larger runner labels; this single-maintainer release mirror instead needs release provenance, overlay accountability and runnable verification on standard GitHub-hosted runners.",
       "paths": [
         ".github/workflows/contributor-check.yml",
+        ".github/workflows/js-tests.yml",
+        ".github/workflows/nix.yml",
+        ".github/workflows/rust-tests.yml",
+        ".github/workflows/tests-os.yml",
+        ".github/workflows/tests.yml",
         "FORK_POLICY.md",
         "fork-maintenance/audit_overlay.py",
         "fork-maintenance/patches.v1.json"
       ],
-      "retirement_probe": "On a future upstream release, inspect its CI for a supported release-mirror or downstream-overlay mode that verifies an immutable upstream release base and a declared patch stack without remapping upstream authors.",
-      "retirement_condition": "Retire or narrow this patch when upstream supplies behaviorally equivalent fork provenance and overlay auditing."
+      "retirement_probe": "On a future upstream release, inspect its CI for a supported release-mirror or downstream-overlay mode that verifies an immutable upstream release base, a declared patch stack and a standard-runner fallback without remapping upstream authors.",
+      "retirement_condition": "Retire or narrow this patch when upstream supplies behaviorally equivalent fork provenance, overlay auditing and portable runner selection."
     }
   ]
 }

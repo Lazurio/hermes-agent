@@ -57,5 +57,7 @@ remains in Git; the live manifest describes only the current overlay.
 
 Runtime-changing patches require a dedicated compatibility test and a named
 upstream issue or other public convergence target. The maintenance-policy patch
-is deliberately runtime-neutral and may remain while upstream's contributor CI
-assumes a multi-contributor development repository.
+is deliberately runtime-neutral and may remain while upstream CI assumes a
+multi-contributor development repository and NousResearch-owned larger runner
+labels. In this mirror those jobs use standard GitHub-hosted runners with
+bounded concurrency; upstream keeps its larger runners unchanged.

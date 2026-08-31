@@ -30,7 +30,9 @@ jobs:
     # cargo builds codegen units and test binaries in parallel across the
     # cores. This lane also builds the crate from the start when Cargo.toml
     # changes.
-    runs-on: ubuntu-latest-32-core
+    # Keep upstream's larger runner while making the release mirror runnable
+    # without NousResearch-owned runner labels.
+    runs-on: ${{ github.repository == 'Lazurio/hermes-agent' && 'ubuntu-latest' || 'ubuntu-latest-32-core' }}
     timeout-minutes: 30
     defaults:
       run:
