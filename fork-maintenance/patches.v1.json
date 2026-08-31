@@ -1,0 +1,41 @@
+{
+  "schema_version": "lazurio.hermes-fork-patches.v1",
+  "repository": {
+    "canonical": "Lazurio/hermes-agent",
+    "maintainer": "immakermatty",
+    "model": "single-maintainer-release-mirror"
+  },
+  "upstream": {
+    "repository": "NousResearch/hermes-agent",
+    "release_tag": "v2026.8.27",
+    "release_page": "https://github.com/NousResearch/hermes-agent/releases/tag/v2026.8.27",
+    "tag_object": "fcebd62163497e77e5de00d26d2ed86cb4ef8761",
+    "commit": "5fc308a70719a83cccdbba4c0e39c23f5a8239d5",
+    "tree": "222ec43b5237deb643277bc2f64fa4b873dd7f28"
+  },
+  "bridge": {
+    "commit": "6814181b033e3469fdbfb477dc46f4227cd87a71",
+    "previous_fork_head": "a4973c3f11d9cc92da986cbe150d1e79d094626f",
+    "parent_order": [
+      "5fc308a70719a83cccdbba4c0e39c23f5a8239d5",
+      "a4973c3f11d9cc92da986cbe150d1e79d094626f"
+    ],
+    "tree_matches_upstream": true
+  },
+  "patches": [
+    {
+      "id": "fork-maintenance-contract",
+      "status": "active",
+      "runtime_delta": false,
+      "upstream_gap": "The upstream contributor-attribution gate assumes an active multi-contributor development repository; this fork is a single-maintainer release mirror and instead needs release provenance plus overlay accountability.",
+      "paths": [
+        ".github/workflows/contributor-check.yml",
+        "FORK_POLICY.md",
+        "fork-maintenance/audit_overlay.py",
+        "fork-maintenance/patches.v1.json"
+      ],
+      "retirement_probe": "On a future upstream release, inspect its CI for a supported release-mirror or downstream-overlay mode that verifies an immutable upstream release base and a declared patch stack without remapping upstream authors.",
+      "retirement_condition": "Retire or narrow this patch when upstream supplies behaviorally equivalent fork provenance and overlay auditing."
+    }
+  ]
+}

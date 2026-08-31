@@ -15,89 +15,49 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      review_status: ${{ steps.check-emails.outputs.review_status }}
+      review_status: ${{ steps.check.outputs.review_status }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          fetch-depth: 0  # Full history needed for git log
+          fetch-depth: 0
 
-      - name: Check for unmapped contributor emails
-        id: check-emails
+      - name: Check repository maintenance contract
+        id: check
+        shell: bash
         run: |
-          # Get the merge base between this PR and main
-          MERGE_BASE=$(git merge-base origin/main HEAD)
+          set +e
+          case "$GITHUB_REPOSITORY" in
+            NousResearch/hermes-agent)
+              SOURCE="contributor attribution"
+              python3 scripts/audit_pr_attribution.py
+              RC=$?
+              ;;
+            Lazurio/hermes-agent)
+              SOURCE="Lazurio fork provenance"
+              python3 fork-maintenance/audit_overlay.py
+              RC=$?
+              ;;
+            *)
+              SOURCE="repository identity"
+              echo "Unsupported repository identity: $GITHUB_REPOSITORY"
+              RC=1
+              ;;
+          esac
 
-          # Find any new author emails in this PR's commits
-          NEW_EMAILS=$(git log ${MERGE_BASE}..HEAD --format='%ae' --no-merges | sort -u)
-
-          if [ -z "$NEW_EMAILS" ]; then
-            echo "No new commits to check."
+          if [ "$RC" -eq 0 ]; then
             echo "review_status=[]" >> "$GITHUB_OUTPUT"
             echo "review_status=[]" > review-status.json
-            exit 0
-          fi
-
-          # An email is mapped if it has a file in contributors/emails/
-          # (one file per email — conflict-free) or an entry in the frozen
-          # legacy AUTHOR_MAP in scripts/release.py.
-          MISSING=""
-          while IFS= read -r email; do
-            # Skip teknium and bot emails
-            case "$email" in
-              *teknium*|*noreply@github.com*|*dependabot*|*github-actions*|*anthropic.com*|*cursor.com*)
-                continue ;;
-            esac
-
-            if echo "$email" | grep -qP '\+.*@users\.noreply\.github\.com'; then
-              continue  # GitHub id+login noreply emails auto-resolve
-            fi
-
-            if [ -f "contributors/emails/${email}" ]; then
-              continue  # mapped via the contributors directory
-            fi
-
-            if ! grep -qF "\"${email}\"" scripts/release.py 2>/dev/null; then
-              AUTHOR=$(git log --author="$email" --format='%an' -1)
-              MISSING="${MISSING}\n  ${email} (${AUTHOR})"
-            fi
-          done <<< "$NEW_EMAILS"
-
-          if [ -n "$MISSING" ]; then
-            echo ""
-            echo "⚠️  New contributor email(s) without a mapping:"
-            echo -e "$MISSING"
-            echo ""
-            echo "Add a mapping file (do NOT edit AUTHOR_MAP in release.py):"
-            echo "  python3 scripts/audit_pr_attribution.py --fix   # auto-resolve + create files"
-            echo "or manually:"
-            echo -e "$MISSING" | while read -r line; do
-              email=$(echo "$line" | sed 's/^ *//' | cut -d' ' -f1)
-              [ -z "$email" ] && continue
-              echo "    python3 scripts/add_contributor.py ${email} <github-username>"
-            done
-            echo ""
-            echo "To find the GitHub username for an email:"
-            echo "  gh api 'search/users?q=EMAIL+in:email' --jq '.items[0].login'"
-
-            # Emit review_status for unmapped emails
-            DETAIL=$(echo -e "$MISSING" | sed '/^$/d; s/^  //')
-            HOW_TO_FIX=$'Run from the PR branch:\n```\npython3 scripts/audit_pr_attribution.py --fix\ngit add contributors && git commit -m "chore: map contributor emails" && git push\n```\nOr map one email manually (do NOT edit AUTHOR_MAP in release.py):\n```\npython3 scripts/add_contributor.py <email> <github-username>\n```\nTo find the GitHub username for an email:\n```\ngh api \'search/users?q=EMAIL+in:email\' --jq \'.items[0].login\'\n```\n'
+          else
             REVIEW_STATUS=$(jq -nc \
-              --arg detail "$DETAIL" \
-              --arg how_to_fix "$HOW_TO_FIX" \
-              '[{"source":"contributor attribution","results":[{"kind":"action_required","title":"Unmapped contributor email(s)","summary":"New contributor email(s) are not in AUTHOR_MAP.","detail":$detail,"how_to_fix":$how_to_fix}]}]')
+              --arg source "$SOURCE" \
+              '[{"source":$source,"results":[{"kind":"action_required","title":"Repository maintenance contract failed","summary":"The branch does not satisfy the repository-specific provenance gate.","detail":"Read the failed audit output above.","how_to_fix":"For Lazurio/hermes-agent, update fork-maintenance/patches.v1.json and keep the branch a declared overlay on a tree-neutral upstream release bridge. For NousResearch/hermes-agent, add the missing contributor mapping."}]}]')
             echo "review_status=$REVIEW_STATUS" >> "$GITHUB_OUTPUT"
             echo "review_status=$REVIEW_STATUS" > review-status.json
-
-            exit 1
-          else
-            echo "✅ All contributor emails are mapped."
-            echo "review_status=[]" >> "$GITHUB_OUTPUT"
-            echo "review_status=[]" > review-status.json
           fi
+          exit "$RC"
 
       - name: Upload review status artifact
-        if: always() && steps.check-emails.outcome != 'skipped'
+        if: always()
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
