@@ -20,6 +20,10 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
+          # The overlay audit judges the immutable candidate itself. GitHub's
+          # synthetic pull-request merge is neither a fork patch nor a release
+          # bridge and must not become part of the audited commit graph.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Check repository maintenance contract
         id: check
