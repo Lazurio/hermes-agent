@@ -1,0 +1,27 @@
+name: lazurio_web
+label: Lazurio web
+kind: platform
+version: 1.0.0
+description: >
+  The Lazurio web channel: Buddy's chat bubble in the Lazurio web apps talks to
+  this Hermes Agent through it. A loopback-only HTTP API (runtime contract
+  lazurio.buddy-runtime.v1) for the Lazurio frame server in the same Osobní
+  Prostředí: messages in, a durable server-sent event stream out (streaming
+  replies, tool status, clarify cards, files), transcript pages and /stop.
+  Bearer secret from a 0600 file, Host/Origin checks, owner-only allowlist.
+  A pre_llm_call hook gives the model the page the person is looking at, as
+  labelled data on the model's copy of the turn only. See README.md.
+author: Lazurio
+provides_hooks:
+  - pre_llm_call
+# Surfaced in the `hermes config` UI by the platform-plugin env var injector.
+requires_env:
+  - name: LAZURIO_WEB_ALLOWED_USERS
+    description: "Allowlist of the web channel; the bubble always speaks as 'owner', so set it to owner"
+    prompt: "Allowed users (owner)"
+    password: false
+optional_env:
+  - name: LAZURIO_WEB_SECRET_FILE
+    description: "Path of the 0600 file holding the bearer secret (overrides extra.secret_file)"
+    prompt: "Secret file path"
+    password: false
