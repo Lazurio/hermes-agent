@@ -53,6 +53,13 @@ class OutboxEvent:
 
 
 @dataclass(frozen=True)
+class InboundClaim:
+    message_id: str
+    created_at: float
+    created: bool
+
+
+@dataclass(frozen=True)
 class MediaRecord:
     id: str
     name: str
@@ -106,11 +113,6 @@ class Outbox:
             row = self._conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'events'").fetchone()
         return int(row[0]) if row else 0
 
-    def first_id(self) -> Optional[int]:
-        with self._lock:
-            row = self._conn.execute("SELECT MIN(id) FROM events").fetchone()
-        return int(row[0]) if row and row[0] is not None else None
-
     def last_of_type(self, event_type: str) -> Optional[OutboxEvent]:
         with self._lock:
             row = self._conn.execute(
@@ -120,17 +122,18 @@ class Outbox:
 
     # -- idempotent intake ----------------------------------------------------------------------
 
-    def claim_inbound(self, client_id: str, message_id: str) -> tuple[str, bool]:
-        """``(message_id, created)``: the id stored for ``client_id``, and whether this call stored it."""
+    def claim_inbound(self, client_id: str, message_id: str) -> InboundClaim:
+        """The claim stored for ``client_id``; ``created`` when this call stored it."""
+        now = time.time()
         with self._lock:
             cursor = self._conn.execute(
                 "INSERT OR IGNORE INTO inbound (client_id, message_id, created_at) VALUES (?, ?, ?)",
-                (client_id, message_id, time.time()))
+                (client_id, message_id, now))
             if cursor.rowcount:
-                return message_id, True
+                return InboundClaim(message_id, now, True)
             row = self._conn.execute(
-                "SELECT message_id FROM inbound WHERE client_id = ?", (client_id,)).fetchone()
-        return row[0], False
+                "SELECT message_id, created_at FROM inbound WHERE client_id = ?", (client_id,)).fetchone()
+        return InboundClaim(row[0], float(row[1]), False)
 
     def forget_inbound(self, client_id: str) -> None:
         """Release a claim whose dispatch failed, so the client's retry is dispatched again."""

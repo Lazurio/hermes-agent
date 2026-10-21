@@ -49,7 +49,7 @@ from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 
 from . import clarify, history, page_context
 from .errors import ApiError
-from .outbox import EventHub, MediaRecord, Outbox
+from .outbox import EventHub, InboundClaim, MediaRecord, Outbox
 
 if TYPE_CHECKING:
     from .http_api import InboundMessage
@@ -67,11 +67,14 @@ STREAM_MAX_SECONDS = 100.0
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
 EVENT_RETENTION_SECONDS = 3 * 24 * 3600
 INBOUND_RETENTION_SECONDS = 7 * 24 * 3600
+# A retried client_id is dispatched again only while its claim is younger than this.
+INBOUND_REDISPATCH_SECONDS = 3600
 MEDIA_RETENTION_SECONDS = 7 * 24 * 3600
 PRUNE_INTERVAL_SECONDS = 3600.0
 CLARIFY_POLL_SECONDS = 0.5
 _RETIRED_MEMORY = 256
 _FINALS_MEMORY = 256
+_DISPATCHED_MEMORY = 1024
 
 
 class SecretFileError(ValueError):
@@ -132,6 +135,8 @@ class LazurioWebAdapter(BasePlatformAdapter):
         self._clarify_watchers: dict[str, asyncio.Task] = {}
         self._retired: OrderedDict[str, None] = OrderedDict()
         self._finals: OrderedDict[str, str] = OrderedDict()
+        self._intake_lock = asyncio.Lock()
+        self._dispatched: OrderedDict[str, None] = OrderedDict()  # message ids this process dispatched
         self._prune_task: Optional[asyncio.Task] = None
 
     # -- lifecycle ------------------------------------------------------------------------------
@@ -245,8 +250,10 @@ class LazurioWebAdapter(BasePlatformAdapter):
         return await asyncio.to_thread(self._emit_now, event_type, data)
 
     async def _deliver(self, event_type: str, data: dict[str, Any], message_id: str) -> SendResult:
-        """A send succeeds only after its event is durable; a failed commit is retryable, so the
-        base retry and the delivery ledger try again instead of counting the reply as delivered."""
+        """A send succeeds only after its event is durable. A failed commit is retryable: for a final
+        text reply the base retry and the gateway's delivery ledger try again instead of counting it
+        as delivered. Files are outside that ledger (core brackets final text only); a failed file
+        event surfaces as the gateway's media-failure notice."""
         try:
             await self._emit(event_type, data)
         except (sqlite3.Error, OSError, RuntimeError) as exc:
@@ -444,22 +451,52 @@ class LazurioWebAdapter(BasePlatformAdapter):
             source=self._owner_source(message_id), message_id=message_id, media_urls=media_urls,
             media_types=media_types, timestamp=datetime.now(tz=UTC))
 
+    def _lineage_rows(self, session_key: str) -> list[dict[str, Any]]:
+        """The conversation's stored rows, root to tip across compression rotations."""
+        store = getattr(self, "_session_store", None)
+        session_id = store.peek_session_id(session_key) if store is not None else None
+        db = getattr(store, "_db", None) if store is not None else None
+        if not session_id or db is None:
+            return []
+        return db.get_messages(db.resolve_resume_session_id(session_id), include_ancestors=True)
+
+    def _in_transcript(self, session_key: str, message_id: str) -> bool:
+        """Whether Hermes persisted the person's message: its user row carries the API's message id
+        as ``platform_message_id``."""
+        return any(row.get("platform_message_id") == message_id for row in self._lineage_rows(session_key))
+
+    async def _claim_settled(self, claim: InboundClaim) -> bool:
+        """A repeated ``client_id`` is answered without dispatch when this process already handed
+        the message to the gateway (queued or running) or Hermes persisted it. A claim left behind
+        by a gateway that died before either happened is dispatched again, so a retry recovers the
+        message instead of hitting a dead claim. Claims older than ``INBOUND_REDISPATCH_SECONDS``
+        count as settled."""
+        if claim.message_id in self._dispatched or time.time() - claim.created_at > INBOUND_REDISPATCH_SECONDS:
+            return True
+        return await asyncio.to_thread(self._in_transcript, self.owner_session_key(), claim.message_id)
+
     async def submit_message(self, inbound: InboundMessage) -> str:
+        """Intake is serialized: a concurrent retry waits for the first attempt instead of being told
+        202 for a claim that attempt may still roll back."""
         self._require_owner()
-        message_id, created = await asyncio.to_thread(
-            self.outbox.claim_inbound, inbound.client_id, uuid.uuid4().hex)
-        if not created:
-            return message_id
-        try:
-            event = await self._build_event(inbound, message_id)
-            block = page_context.render(page_context.validate(inbound.context))
-            if block:
-                page_context.STORE.put(message_id, block)
-            await self.handle_message(event)
-        except BaseException:
-            await asyncio.to_thread(self.outbox.forget_inbound, inbound.client_id)
-            raise
-        return message_id
+        async with self._intake_lock:
+            claim = await asyncio.to_thread(self.outbox.claim_inbound, inbound.client_id, uuid.uuid4().hex)
+            if not claim.created and await self._claim_settled(claim):
+                return claim.message_id
+            try:
+                event = await self._build_event(inbound, claim.message_id)
+                block = page_context.render(page_context.validate(inbound.context))
+                if block:
+                    page_context.STORE.put(claim.message_id, block)
+                await self.handle_message(event)
+            except BaseException:
+                if claim.created:
+                    await asyncio.to_thread(self.outbox.forget_inbound, inbound.client_id)
+                raise
+            self._dispatched[claim.message_id] = None
+            while len(self._dispatched) > _DISPATCHED_MEMORY:
+                self._dispatched.popitem(last=False)
+            return claim.message_id
 
     async def request_stop(self) -> dict[str, Any]:
         """``/stop`` through the gateway's own command path, so it behaves as typed on Telegram."""
@@ -488,13 +525,7 @@ class LazurioWebAdapter(BasePlatformAdapter):
         return {"resolved": True}
 
     def _history_page(self, session_key: str, before: Optional[int], limit: int):
-        store = getattr(self, "_session_store", None)
-        session_id = store.peek_session_id(session_key) if store is not None else None
-        db = getattr(store, "_db", None) if store is not None else None
-        if not session_id or db is None:
-            return [], None
-        rows = db.get_messages(db.resolve_resume_session_id(session_id), include_ancestors=True)
-        return history.page(rows, before, limit)
+        return history.page(self._lineage_rows(session_key), before, limit)
 
     async def read_history(self, before: Optional[int], limit: int) -> dict[str, Any]:
         """``last_event_id`` is read BEFORE the transcript: replaying from it may repeat a reply the

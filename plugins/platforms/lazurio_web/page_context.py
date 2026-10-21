@@ -60,9 +60,10 @@ def _exact(value: Any, keys: frozenset[str]) -> bool:
 def _environment(value: Any) -> Optional[dict[str, str]]:
     if not _exact(value, frozenset({"id", "kind", "name"})):
         return None
-    env_id, name = _token(value["id"]), _name(value["name"])
-    kind = value["kind"] if value["kind"] in _KIND_LABELS else None
-    return {"id": env_id, "kind": kind, "name": name} if env_id and kind and name else None
+    env_id, name, kind = _token(value["id"]), _name(value["name"]), value["kind"]
+    # Type first: a JSON array or object is unhashable and must be refused, not raise.
+    kind_ok = isinstance(kind, str) and kind in _KIND_LABELS
+    return {"id": env_id, "kind": kind, "name": name} if env_id and kind_ok and name else None
 
 
 def _organization(value: Any) -> Optional[dict[str, str]]:
@@ -92,11 +93,11 @@ _NULLABLE = {"environment": _environment, "organization": _organization, "guide"
 
 def _scalar(key: str, value: Any) -> tuple[bool, Any]:
     if key == "v":
-        return value == 1 and not isinstance(value, bool), value
+        return type(value) is int and value == 1, value
     if key == "lang":
-        return value in ("cs", "en"), value
+        return isinstance(value, str) and value in ("cs", "en"), value
     if key == "theme":
-        return value in ("light", "dark"), value
+        return isinstance(value, str) and value in ("light", "dark"), value
     if key == "app":
         return _token(value, _APP) is not None, value
     page = _page(value)

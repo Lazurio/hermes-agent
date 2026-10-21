@@ -120,6 +120,101 @@ async def test_a_retried_client_id_dispatches_once(web):
     assert seen == [ids[0]]
 
 
+def _transcript_store(adapter, tmp_path, *rows):
+    """A session store whose transcript holds ``rows`` of ``(role, content, platform_message_id)``."""
+    from types import SimpleNamespace
+
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("s1", source="lazurio_web")
+    for role, content, platform_message_id in rows:
+        db.append_message("s1", role, content=content, platform_message_id=platform_message_id)
+    key = adapter.owner_session_key()
+    adapter.set_session_store(SimpleNamespace(peek_session_id=lambda k: "s1" if k == key else None, _db=db))
+    return db
+
+
+@pytest.mark.asyncio
+async def test_a_retry_recovers_a_claim_left_by_a_gateway_that_died(web, tmp_path):
+    """Review finding: the claim used to outlive the in-memory dispatch, so after a crash the retry
+    got the old id and nothing ran. A claim this process never dispatched and Hermes never persisted
+    is dispatched again, under the same id; once dispatched, a retry stays a no-op."""
+    seen = []
+
+    async def handler(event):
+        seen.append(event.message_id)
+        return "ok"
+
+    async with web.running(handler=handler) as rig:
+        db = _transcript_store(rig.adapter, tmp_path, ("user", "Uloženo", "m-persisted"))
+        rig.adapter.outbox.claim_inbound("lost-client", "m-lost")  # the previous gateway's claim
+        rig.adapter.outbox.claim_inbound("kept-client", "m-persisted")
+        for client_id, expected in (("lost-client", "m-lost"), ("lost-client", "m-lost"),
+                                    ("kept-client", "m-persisted")):
+            async with rig.client.post(f"{rig.base}/v1/messages", json=_message(client_id)) as resp:
+                assert resp.status == 202
+                assert (await resp.json())["message_id"] == expected
+        await async_wait_until(lambda: seen and not rig.adapter._active_sessions, what="the turn finished")
+    db.close()
+    assert seen == ["m-lost"]
+
+
+@pytest.mark.asyncio
+async def test_a_concurrent_retry_is_never_acknowledged_for_a_rolled_back_claim(web, monkeypatch):
+    """Review finding: a retry racing a first attempt that then failed used to get 202 for the
+    claim that attempt deleted. Intake is serialized, so the 202 always names a dispatched message."""
+    seen = []
+
+    async def handler(event):
+        seen.append(event.message_id)
+        return "ok"
+
+    async with web.running(handler=handler) as rig:
+        real_handle = rig.adapter.handle_message
+        calls = []
+
+        async def flaky_handle(event):
+            calls.append(event.message_id)
+            if len(calls) == 1:
+                raise RuntimeError("dispatch failed")
+            await real_handle(event)
+
+        monkeypatch.setattr(rig.adapter, "handle_message", flaky_handle)
+
+        async def post():
+            async with rig.client.post(f"{rig.base}/v1/messages", json=_message("racing")) as resp:
+                return resp.status, (await resp.json()) if resp.status == 202 else None
+
+        answers = await asyncio.gather(post(), post())
+        await async_wait_until(lambda: seen and not rig.adapter._active_sessions, what="the turn finished")
+    assert sorted(status for status, _ in answers) == [202, 500]
+    (acknowledged,) = [body["message_id"] for status, body in answers if status == 202]
+    assert seen == [acknowledged]
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_context_never_fails_the_message(web):
+    """Review finding: a JSON array as environment.kind raised TypeError and turned a valid message
+    into a 500. The context is dropped; the message runs."""
+    from plugins.platforms.lazurio_web.page_context import STORE
+
+    seen = []
+
+    async def handler(event):
+        seen.append(event.message_id)
+        return "ok"
+
+    async with web.running(handler=handler) as rig:
+        body = _message("bad-context", context={"environment": {"id": "a", "kind": [], "name": "b"}})
+        async with rig.client.post(f"{rig.base}/v1/messages", json=body) as resp:
+            assert resp.status == 202
+            message_id = (await resp.json())["message_id"]
+        await async_wait_until(lambda: seen, what="the turn started")
+    assert seen == [message_id]
+    assert STORE.get(message_id) is None
+
+
 @pytest.mark.asyncio
 async def test_the_owner_is_refused_when_the_allowlist_does_not_admit_them(web):
     seen = []
@@ -203,6 +298,23 @@ async def test_send_succeeds_only_after_the_event_is_durable(web, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_file_whose_event_cannot_be_recorded_is_reported_as_not_sent(web, monkeypatch, tmp_path):
+    """Files are outside the gateway's delivery ledger (core brackets final text only). What the
+    adapter owes: never report a file as sent unless its event is durable, so the gateway's
+    media-failure notice runs instead of silence."""
+    report = tmp_path / "out.pdf"
+    report.write_bytes(b"%PDF-1.4")
+
+    def fail(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    async with web.running() as rig:
+        monkeypatch.setattr(rig.adapter.outbox, "append", fail)
+        result = await rig.adapter.send_document("owner", str(report), file_name="out.pdf")
+    assert result.success is False
+
+
+@pytest.mark.asyncio
 async def test_replay_after_reconnect_loses_and_repeats_nothing(web):
     async with web.running() as rig:
         start = rig.adapter.outbox.last_id()
@@ -232,6 +344,33 @@ async def test_a_pruned_cursor_is_reported_as_a_replay_gap(web):
         events = await web.read_events(rig.client, rig.base, after=start, until=lambda evs: len(evs) == 2)
     assert events[0] == {"id": None, "type": "error", "data": {"code": "replay_gap"}}
     assert events[1]["data"]["text"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_a_prune_between_replay_batches_is_reported_as_a_gap(web, monkeypatch):
+    """Review finding: the gap was checked once per stream, so a prune between two replay batches
+    skipped events silently. Every read checks that it continues exactly after the cursor."""
+    from plugins.platforms.lazurio_web import http_api
+
+    monkeypatch.setattr(http_api, "REPLAY_BATCH", 2)
+    async with web.running() as rig:
+        outbox = rig.adapter.outbox
+        start = outbox.last_id()
+        for text in ("1", "2", "3", "4", "5", "6"):
+            await rig.adapter.send("owner", text)
+        real_read = outbox.read_after
+
+        def read_then_prune(after, limit):
+            batch = real_read(after, limit)
+            if after == start:  # the hourly prune lands right after the first batch
+                with outbox._lock:
+                    outbox._conn.execute("DELETE FROM events WHERE id IN (?, ?)", (start + 3, start + 4))
+            return batch
+
+        monkeypatch.setattr(outbox, "read_after", read_then_prune)
+        events = await web.read_events(rig.client, rig.base, after=start, until=lambda evs: len(evs) == 5)
+    assert [e["data"].get("text", e["data"].get("code")) for e in events] == ["1", "2", "replay_gap", "5", "6"]
+    assert events[2]["id"] is None
 
 
 @pytest.mark.asyncio

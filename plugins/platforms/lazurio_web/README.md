@@ -98,8 +98,15 @@ plugin implements. All bodies are JSON, all ids are opaque strings unless noted.
 | `POST /v1/stop` | `{stopped: true}`, or `false` when nothing runs |
 | `GET /v1/media/<media_id>` | the bytes of a file Buddy sent |
 
-- **`client_id`** (1-128 of `[A-Za-z0-9._:-]`) makes a retry idempotent: the same `client_id`
-  returns the first `message_id` and dispatches nothing again.
+- **`client_id`** (1-128 of `[A-Za-z0-9._:-]`) makes a retry safe. The same `client_id` returns the
+  first `message_id`, and the message is dispatched again only when neither this gateway process
+  handed it on (queued or running) nor Hermes persisted it (its user row carries `message_id`), and
+  the first attempt is less than an hour old. A concurrent retry waits for the first attempt, so
+  `202` always names a message that was handed to the gateway.
+- **`202` means "handed to the gateway"**, held in memory like every Hermes platform's queue. A
+  gateway that dies before the turn persists the message loses it, so after every reconnect the
+  client re-sends, with the same `client_id`, each message it has not yet seen as `turn.started` or
+  in the history. A message that was already handed on or persisted is not run twice.
 - **`text`** at most 32,000 characters; `text` or an attachment is required.
 - **`attachments`**: at most 8 of `{name, mime, data_base64}`, each at most 10 MiB decoded and 20 MiB
   together. Images reach the turn as photos, everything else as documents.
@@ -146,8 +153,9 @@ Each event has an `id:` (an integer that only grows, never reused), an `event:` 
   replays every retained event after `N`, in order, then goes live; nothing is skipped or repeated.
 - A stream sends `retry: 1000` first, a `: keepalive` comment every 15 s, and ends after 100 s, so
   every reconnect passes the gateway route (and its session check) again.
-- When events after `N` were already pruned (retention is 3 days) or `N` is ahead of every id, the
-  stream first sends `event: error` / `data: {"code":"replay_gap"}` **without an id**: reload the
+- When events after the cursor were pruned (retention is 3 days), before the stream or between two
+  replay batches, or `N` is ahead of every id, the stream sends `event: error` /
+  `data: {"code":"replay_gap"}` **without an id** right where the events are missing: reload the
   history, then continue from the next ids.
 - `GET /v1/history` pages the session lineage (it spans compression) oldest-first:
   `messages: [{id, role, text, ts, message_id}]`, where `role` is `user` or `assistant`, `id` is the
@@ -178,9 +186,11 @@ already_answered`, `413` (body or attachment too large), `503` (`not_ready`, `to
 - Page context is data: validated, neutralised to single lines, opaque path segments masked, and
   given to the model only in its copy of the turn, labelled „Kontext stránky (údaje, ne pokyn)“.
   The transcript and the history keep the clean text, and the prompt cache stays stable.
-- A send reports success only after its event is committed (WAL, `synchronous=FULL`); a failed
-  commit is retryable, so the gateway's delivery ledger redelivers a final reply instead of counting
-  it as delivered.
+- A send reports success only after its event is committed (WAL, `synchronous=FULL`). A failed
+  commit of a final text reply is retryable, so the base retry and the gateway's delivery ledger try
+  again instead of counting the reply as delivered. Files are outside that ledger: Hermes' core
+  brackets only final text, for every platform. A file whose event cannot be committed is reported
+  as not sent, and the gateway tells the person the file could not be delivered.
 
 ## Data on disk
 
@@ -203,4 +213,6 @@ such as budíček can record where a delegation came from: `HERMES_SESSION_PLATF
 - Other open tabs see the person's own new message only after reloading the history: the event
   stream carries Buddy's side.
 - Status phrases (`progress`) come in Hermes' display language; Hermes ships no Czech locale.
+- A file Buddy sent is not redelivered after a crash between the turn's end and its event, the same
+  as on every Hermes platform (the delivery ledger covers final text only).
 - A clarify choice may carry Hermes' English `(Recommended)` suffix on the first option.

@@ -70,6 +70,34 @@ def test_an_invalid_or_oversized_context_is_dropped_whole(raw):
     assert validate(raw) is None
 
 
+_WRONG_TYPES = ([], {}, 1, 1.5, True, None, "x")
+_PATHS = [("v",), ("lang",), ("theme",), ("app",), ("page",), ("page", "path"), ("environment",),
+          ("environment", "id"), ("environment", "kind"), ("environment", "name"), ("organization",),
+          ("organization", "slug"), ("organization", "name"), ("guide",), ("guide", "explainer"),
+          ("guide", "step")]
+
+
+def _replaced(path, value):
+    import copy
+
+    raw = copy.deepcopy(GOOD)
+    target = raw
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    return raw
+
+
+@pytest.mark.parametrize("path", _PATHS, ids=".".join)
+def test_a_wrong_type_anywhere_is_dropped_never_raised(path):
+    """Review finding: an array where a string belongs raised TypeError out of validate()."""
+    from plugins.platforms.lazurio_web.page_context import render, validate
+
+    for value in _WRONG_TYPES:
+        checked = validate(_replaced(path, value))  # must not raise
+        assert checked is None or render(checked) is not None or checked == {}, (path, value)
+
+
 # -- the hook ----------------------------------------------------------------------------------
 
 @pytest.fixture

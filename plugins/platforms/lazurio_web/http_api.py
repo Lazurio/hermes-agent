@@ -293,18 +293,16 @@ class Handlers:
         finally:
             self._streams -= 1
 
-    async def _start_cursor(self, after: Optional[int]) -> tuple[int, bool]:
-        """``(cursor, gap)``. No ``after`` means "from now on". A cursor older than the oldest
-        retained event, or ahead of the newest id ever assigned, cannot be replayed exactly."""
-        outbox = self.api.outbox
-        last = await asyncio.to_thread(outbox.last_id)
+    async def _start_cursor(self, after: Optional[int]) -> tuple[int, bool, bool]:
+        """``(cursor, gap, owed)``. No ``after`` means "from now on". A cursor ahead of the newest id
+        ever assigned (a recreated store) cannot be replayed: report a gap and go live. ``owed``:
+        events after the cursor were assigned, so a first read that finds none means all were pruned."""
+        last = await asyncio.to_thread(self.api.outbox.last_id)
         if after is None:
-            return last, False
+            return last, False, False
         if after > last:
-            return last, True
-        first = await asyncio.to_thread(outbox.first_id)
-        pruned_all = first is None and after < last
-        return after, pruned_all or (first is not None and first > after + 1)
+            return last, True, False
+        return after, False, after < last
 
     async def _stream(self, request: web.Request, after: Optional[int]) -> web.StreamResponse:
         api, outbox, hub = self.api, self.api.outbox, self.api.hub
@@ -317,12 +315,17 @@ class Handlers:
         wakeup = hub.subscribe()
         try:
             await response.write(b"retry: 1000\n\n")
-            cursor, gap = await self._start_cursor(after)
+            cursor, gap, owed = await self._start_cursor(after)
             if gap:
                 await response.write(_GAP_FRAME)
             while not hub.closed:
                 wakeup.clear()
                 batch = await asyncio.to_thread(outbox.read_after, cursor, REPLAY_BATCH)
+                # Ids are assigned one by one and only pruning deletes rows, so a jump past
+                # cursor + 1 means unread events were pruned, before this stream or between batches.
+                if (batch and batch[0].id != cursor + 1) or (owed and not batch):
+                    await response.write(_GAP_FRAME)
+                owed = False
                 for event in batch:
                     await response.write(sse_frame(event))
                     cursor = event.id
