@@ -450,13 +450,15 @@ class LazurioWebAdapter(BasePlatformAdapter):
             media_types=media_types, timestamp=datetime.now(tz=UTC))
 
     def _lineage_rows(self, session_key: str) -> list[dict[str, Any]]:
-        """The conversation's stored rows, root to tip across compression rotations."""
+        """The conversation as displayed: root to tip across compression rotations, including rows an
+        in-place compaction archived (``compacted=1``), never rows Undo/Rewind deactivated."""
         store = getattr(self, "_session_store", None)
         session_id = store.peek_session_id(session_key) if store is not None else None
         db = getattr(store, "_db", None) if store is not None else None
         if not session_id or db is None:
             return []
-        return db.get_messages(db.resolve_resume_session_id(session_id), include_ancestors=True)
+        return db.get_messages(db.resolve_resume_session_id(session_id), include_ancestors=True,
+                               include_compacted=True)
 
     def _in_transcript(self, session_key: str, message_id: str) -> bool:
         """Whether Hermes persisted the person's message: its user row carries the API's message id

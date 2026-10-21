@@ -168,6 +168,35 @@ async def test_a_retry_recovers_a_claim_left_by_a_gateway_that_died(web, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_history_and_retry_dedupe_survive_an_in_place_compaction(web, tmp_path):
+    """Review finding: an in-place compaction archives earlier rows (active=0, compacted=1); the
+    active-only read lost them from the history and let a retry of a processed message run again."""
+    seen = []
+
+    async def handler(event):
+        seen.append(event.message_id)
+        return "ok"
+
+    async with web.running(handler=handler) as rig:
+        db = _transcript_store(rig.adapter, tmp_path, ("user", "Ahoj", "m-confirmed"),
+                               ("assistant", "Dobrý den.", None))
+        db.archive_and_compact("s1", [{"role": "user", "content": "[summary]", "_compressed_summary": True}])
+        db.append_message("s1", "user", content="Ještě něco", platform_message_id="m-later")
+        rig.adapter.outbox.claim_inbound("confirmed-client", "m-confirmed")  # a previous gateway's claim
+        async with rig.client.post(f"{rig.base}/v1/messages", json=_message("confirmed-client")) as resp:
+            assert resp.status == 202 and (await resp.json())["message_id"] == "m-confirmed"
+        async with rig.client.get(f"{rig.base}/v1/history", params={"limit": "2"}) as resp:
+            newest = await resp.json()
+        async with rig.client.get(f"{rig.base}/v1/history", params={"before": str(newest["next_before"])}) as resp:
+            older = await resp.json()
+    db.close()
+    assert seen == []  # already processed before the compaction: not run again
+    assert [(m["text"], m["message_id"]) for m in newest["messages"]] == [("Dobrý den.", None), ("Ještě něco", "m-later")]
+    assert [(m["text"], m["message_id"]) for m in older["messages"]] == [("Ahoj", "m-confirmed")]
+    assert older["next_before"] is None
+
+
+@pytest.mark.asyncio
 async def test_a_concurrent_retry_is_never_acknowledged_for_a_rolled_back_claim(web, monkeypatch):
     """Review finding: a retry racing a first attempt that then failed used to get 202 for the
     claim that attempt deleted. Intake is serialized, so the 202 always names a dispatched message."""

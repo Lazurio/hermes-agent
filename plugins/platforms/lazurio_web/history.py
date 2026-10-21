@@ -1,9 +1,10 @@
 """Transcript pages for ``GET /v1/history``.
 
 The bubble's conversation is the Hermes session behind ``agent:main:lazurio_web:dm:owner``. A page is
-read from ``SessionDB.get_messages(include_ancestors=True)`` so it spans compression rotations, and
-only what the person saw survives: their own messages and Buddy's replies. Tool traffic, compaction
-summaries, internal notices and the injected page context stay out.
+read from ``SessionDB.get_messages(include_ancestors=True, include_compacted=True)``: the display read,
+so it spans compression rotations and keeps what an in-place compaction archived. Only what the
+person saw survives: their own messages and Buddy's replies. Tool traffic, compaction summaries,
+internal notices and the injected page context stay out.
 """
 
 from __future__ import annotations
@@ -34,8 +35,12 @@ def _visible_text(content: Any) -> str:
 
 def project(row: dict[str, Any]) -> Optional[dict[str, Any]]:
     """One visible bubble for a stored message, or ``None`` when the person never saw it."""
+    from agent.context_compressor import is_compaction_summary_message
+
     role = row.get("role")
     if role not in ("user", "assistant") or row.get("display_kind") or row.get("_compressed_summary"):
+        return None
+    if is_compaction_summary_message(row):  # the flag can be lost in round-trips; this reads content too
         return None
     text = _visible_text(row.get("content")).strip()
     if not text or (role == "user" and text.startswith(_SCAFFOLD_PREFIX)):
@@ -49,6 +54,8 @@ def page(rows: list[dict[str, Any]], before: Optional[int], limit: int) -> tuple
     """``(messages oldest-first, next_before)``; ``next_before`` is ``None`` on the oldest page."""
     visible = [item for item in map(project, rows) if item is not None]
     if before is not None:
-        visible = [item for item in visible if item["id"] < before]
+        # Position, not id order: in-place compaction re-sequences carried rows under fresh ids.
+        index = next((i for i, item in enumerate(visible) if item["id"] == before), None)
+        visible = visible[:index] if index is not None else [item for item in visible if item["id"] < before]
     chunk = visible[-limit:]
     return chunk, (chunk[0]["id"] if len(visible) > len(chunk) else None)
