@@ -143,9 +143,10 @@ the plugin takes the live status instead.)
 
 ## Security model
 
-- The server binds `127.0.0.1` only, and admission refuses anything a browser sends, so no web page
-  reaches it, not even by DNS rebinding. The frame server's proxy must not forward the browser's
-  `Origin` or `Sec-Fetch-*` headers and must send `Host: 127.0.0.1:<listen_port>`.
+- The server binds `127.0.0.1` only. The exact `Host` stops DNS rebinding, and a request with an
+  `Origin` or `Sec-Fetch-*` header (current browsers send one with every request) is refused before
+  the secret is looked at. The frame server's proxy must not forward the browser's `Origin` or
+  `Sec-Fetch-*` headers and must send `Host: 127.0.0.1:<listen_port>`.
 - The owner is admitted by the gateway's allowlist, not by the adapter; `trusted_inbound` stays off.
 - Page context is data: checked as a closed shape, neutralised to single lines, opaque path
   segments masked, and given to the model only in its copy of the turn, labelled

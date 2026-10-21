@@ -5,8 +5,9 @@ truth). The Lazurio frame server in the same Osobní Prostředí is the only cli
 the contract's order before any route is named:
 
 1. ``Host`` is ``127.0.0.1:<port>``, ``localhost:<port>`` or ``[::1]:<port>``, the peer is loopback,
-   and there is no ``Origin`` and no ``Sec-Fetch-*`` header (every browser sends one): no web page
-   reaches the adapter, not even by DNS rebinding. Else ``403 forbidden``.
+   and there is no ``Origin`` and no ``Sec-Fetch-*`` header (current browsers send one with every
+   request): the exact ``Host`` stops DNS rebinding, and a web page's request is refused before the
+   secret is even looked at. Else ``403 forbidden``.
 2. ``Authorization: Bearer <secret>``, compared in constant time. Else ``401 unauthorized``.
 3. The route. Else ``404 not-found`` or ``405 method-not-allowed``.
 
