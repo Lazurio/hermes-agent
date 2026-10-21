@@ -15,30 +15,40 @@ from tests.waiting import async_wait_until
 # -- streaming ---------------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_a_streamed_reply_arrives_as_deltas_then_one_final(web):
+async def test_a_streamed_reply_arrives_as_stable_pieces_then_one_final(web):
+    """The consumer edits with whole snapshots that end in a cursor and close an open code fence that
+    later moves. The pieces carry neither, join into a prefix of the answer, and one final replaces
+    them."""
     from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
+    answer = "Tady je oprava:\n```py\nprint('ahoj')\n```\nHotovo."
+    parts = ["Tady je ", "oprava:\n```py\n", "print(", "'ahoj')\n", "```\nHot", "ovo."]
     async with web.running() as rig:
-        start = rig.adapter.outbox.last_id()
+        outbox = rig.adapter.outbox
+        start = outbox.last_id()
         config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=1, cursor=" ▉", transport="edit",
                                       chat_type="dm")
         consumer = GatewayStreamConsumer(rig.adapter, "owner", config)
         task = asyncio.create_task(consumer.run())
-        consumer.on_delta("Dobrý")
-        await async_wait_until(lambda: rig.adapter.outbox.last_id() > start, what="the first delta")
-        consumer.on_delta(" den, jak")
-        consumer.on_delta(" se máte?")
+        so_far = ""
+        for part in parts:  # each part lands as its own snapshot before the next one is written
+            so_far += part
+            consumer.on_delta(part)
+            await async_wait_until(
+                lambda so_far=so_far: any(so_far in snapshot for snapshot, _ in rig.adapter._streams.values()),
+                what="the snapshot with the new part")
         consumer.finish()
         await asyncio.wait_for(task, 10)
         events = await web.read_events(rig.client, rig.base, after=start,
                                        until=lambda evs: any(e["type"] == "message.final" for e in evs))
-    deltas, finals = web.of_type(events, "message.delta"), web.of_type(events, "message.final")
-    assert deltas[0]["data"]["text"] == "Dobrý"
-    assert not any(d["data"]["text"].endswith("▉") for d in deltas)  # the cursor is the client's business
-    assert len(finals) == 1
-    message_id = finals[0]["data"]["message_id"]
-    assert finals[0]["data"] == {"message_id": message_id, "text": "Dobrý den, jak se máte?", "media": []}
-    assert {d["data"]["message_id"] for d in deltas} == {message_id}
+    pieces, finals = web.of_type(events, "message.delta"), web.of_type(events, "message.final")
+    joined = "".join(piece["data"]["text"] for piece in pieces)
+    assert pieces and answer.startswith(joined)
+    assert "▉" not in joined
+    (final,) = finals
+    message_id = final["data"]["message_id"]
+    assert (final["data"]["text"], final["data"]["role"], final["data"]["client_id"]) == (answer, "assistant", None)
+    assert {piece["data"]["message_id"] for piece in pieces} == {message_id}
     assert consumer.final_response_sent is True
 
 
@@ -58,11 +68,10 @@ def _runner_for(adapter, loop):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("multi,answer,expected", [
-    (False, {"choice": 1}, "Brno"),
-    (False, {"choice": "Praha"}, "Praha"),
+    (False, {"choice": "Brno"}, "Brno"),
     (False, {"text": "Do Ostravy"}, "Do Ostravy"),  # „Jiné…“
     (False, {"skip": True}, None),  # „Přeskočit“
-    (True, {"choices": [1, 0]}, json.dumps(["Brno", "Praha"], ensure_ascii=False)),
+    (True, {"choices": ["Brno", "Praha"]}, json.dumps(["Brno", "Praha"], ensure_ascii=False)),
 ])
 async def test_clarify_round_trip_through_the_turn_runner(web, multi, answer, expected):
     async with web.running() as rig:
@@ -71,18 +80,23 @@ async def test_clarify_round_trip_through_the_turn_runner(web, multi, answer, ex
         start = rig.adapter.outbox.last_id()
         questions = [{"qid": "q0", "question": "Kam pojedeme?", "choices": ["Praha", "Brno"], "multi_select": multi}]
         reply = loop.run_in_executor(None, runner._clarify_callback_sync, questions)
-        (request,) = await web.read_events(rig.client, rig.base, after=start, until=lambda evs: len(evs) == 1)
+        request, waiting = await web.read_events(rig.client, rig.base, after=start, until=lambda evs: len(evs) == 2)
         clarify_id = request["data"]["clarify_id"]
-        assert request["type"] == "clarify.request"
+        assert request["type"] == "clarify.request" and waiting["data"] == {"state": "waiting"}
         assert request["data"] == {"clarify_id": clarify_id, "question": "Kam pojedeme?",
                                    "choices": ["Praha", "Brno"], "multi": multi}
+        async with rig.client.get(f"{rig.base}/v1/history") as resp:
+            snapshot = (await resp.json())["snapshot"]
+        assert snapshot["state"] == "waiting" and snapshot["clarify"] == request["data"]
         async with rig.client.post(f"{rig.base}/v1/clarify/{clarify_id}", json=answer) as resp:
-            assert resp.status == 200 and await resp.json() == {"resolved": True}
+            assert resp.status == 202 and await resp.json() == {}
         assert await asyncio.wait_for(reply, 10) == {"answers": {"q0": expected}, "outcome": "submitted"}
-        (retired,) = await web.read_events(rig.client, rig.base, after=request["id"], until=lambda evs: len(evs) == 1)
+        retired, working = await web.read_events(rig.client, rig.base, after=waiting["id"],
+                                                 until=lambda evs: len(evs) == 2)
         assert (retired["type"], retired["data"]) == ("clarify.retired", {"clarify_id": clarify_id})
-        async with rig.client.post(f"{rig.base}/v1/clarify/{clarify_id}", json={"choice": 0}) as resp:
-            assert resp.status == 404
+        assert working["data"] == {"state": "working"}
+        async with rig.client.post(f"{rig.base}/v1/clarify/{clarify_id}", json={"choice": "Praha"}) as resp:
+            assert resp.status == 409 and await resp.json() == {"error": {"code": "conflict"}}
 
 
 @pytest.mark.asyncio
@@ -99,7 +113,26 @@ async def test_a_question_that_ends_elsewhere_is_retired(web):
         cg.clear_session(key)
         events = await web.read_events(rig.client, rig.base, after=start,
                                        until=lambda evs: any(e["type"] == "clarify.retired" for e in evs))
-    assert [e["type"] for e in events] == ["clarify.request", "clarify.retired"]
+    assert [e["type"] for e in events] == ["clarify.request", "status", "clarify.retired", "status"]
+
+
+@pytest.mark.asyncio
+async def test_long_or_repeated_choices_are_shown_as_distinct_lines_and_mapped_back(web):
+    long_choice = "A " + "velmi dlouhá volba " * 20 + "\nna dvou řádcích"
+    async with web.running() as rig:
+        loop = asyncio.get_running_loop()
+        runner = _runner_for(rig.adapter, loop)
+        start = rig.adapter.outbox.last_id()
+        questions = [{"qid": "q0", "question": "Která?", "choices": [long_choice, "Ne", "Ne "], "multi_select": False}]
+        reply = loop.run_in_executor(None, runner._clarify_callback_sync, questions)
+        request = (await web.read_events(rig.client, rig.base, after=start, until=lambda evs: len(evs) == 2))[0]
+        shown = request["data"]["choices"]  # held to the contract by the reader
+        async with rig.client.post(f"{rig.base}/v1/clarify/{request['data']['clarify_id']}",
+                                   json={"choice": shown[0]}) as resp:
+            assert resp.status == 202
+        answers = (await asyncio.wait_for(reply, 10))["answers"]
+    assert len(shown) == 3 and len(set(shown)) == 3 and all(len(choice) <= 200 for choice in shown)
+    assert answers == {"q0": long_choice}  # Hermes' own label, not the shortened one
 
 
 @pytest.mark.asyncio
@@ -110,25 +143,30 @@ async def test_another_sessions_question_cannot_be_answered_here(web):
     cg.register("cid-telegram", telegram_key, "Smazat?", ["Ano", "Ne"])
     try:
         async with web.running() as rig:
-            async with rig.client.post(f"{rig.base}/v1/clarify/cid-telegram", json={"choice": 0}) as resp:
-                assert resp.status == 404
+            async with rig.client.post(f"{rig.base}/v1/clarify/cid-telegram", json={"choice": "Ano"}) as resp:
+                assert resp.status == 404 and await resp.json() == {"error": {"code": "not-found"}}
         assert cg._entries["cid-telegram"].response is None
     finally:
         cg.clear_session(telegram_key)
 
 
-@pytest.mark.parametrize("body", [
-    {"choice": 5}, {"choice": True}, {"choice": "Ostrava"}, {"choices": [0]}, {"skip": "yes"}, {"text": "  "},
-    {"choice": 0, "text": "x"}, {},
-])
-def test_malformed_clarify_answers_are_refused(body):
-    from plugins.platforms.lazurio_web.clarify import answer_value
-    from plugins.platforms.lazurio_web.errors import ApiError
+@pytest.mark.asyncio
+async def test_malformed_clarify_answers_are_refused(web):
+    from tools import clarify_gateway as cg
 
-    entry = SimpleNamespace(clarify_id="cid", choices=["Praha", "Brno"], multi_select=False)
-    with pytest.raises(ApiError) as refused:
-        answer_value(entry, body)
-    assert refused.value.status == 400
+    bodies = [{}, {"choice": "Ano", "text": "x"}, {"choice": ""}, {"choice": "a" * 201}, {"choices": []},
+              {"choices": ["Ano", "Ano"]}, {"choices": [str(i) for i in range(9)]}, {"text": "  "},
+              {"text": "a" * 2001}, {"skip": False}, {"skip": "true"}, {"answer": "Ano"}, ["Ano"],
+              {"choice": "Možná"}, {"choices": ["Ano"]}]  # the last two: not offered / not a multi question
+    async with web.running() as rig:
+        key = rig.adapter.owner_session_key()
+        cg.register("cid-bad", key, "Ano?", ["Ano", "Ne"])
+        assert (await rig.adapter.send_clarify("owner", "Ano?", ["Ano", "Ne"], "cid-bad", key)).success
+        for body in bodies:
+            async with rig.client.post(f"{rig.base}/v1/clarify/cid-bad", json=body) as resp:
+                assert resp.status == 400 and await resp.json() == {"error": {"code": "bad-request"}}, body
+        assert cg._entries["cid-bad"].response is None
+        cg.clear_session(key)
 
 
 # -- authorization, registration, tool environment ---------------------------------------------

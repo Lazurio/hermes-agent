@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS media (
     path TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS message_media (
+    message_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    media_id TEXT NOT NULL,
+    PRIMARY KEY (message_id, position)
+);
 """
 
 
@@ -112,6 +118,15 @@ class Outbox:
             row = self._conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'events'").fetchone()
         return int(row[0]) if row else 0
 
+    def recent_assistant_finals(self, limit: int) -> list[tuple[str, str]]:
+        """``(message_id, text)`` of Buddy's newest ``message.final`` events, newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM events WHERE type = 'message.final' ORDER BY id DESC LIMIT ?",
+                (limit,)).fetchall()
+        finals = (json.loads(row[0]) for row in rows)
+        return [(final["message_id"], final["text"]) for final in finals if final.get("role") == "assistant"]
+
     def last_of_type(self, event_type: str) -> Optional[OutboxEvent]:
         with self._lock:
             row = self._conn.execute(
@@ -133,11 +148,6 @@ class Outbox:
                 "SELECT message_id FROM inbound WHERE client_id = ?", (client_id,)).fetchone()
         return InboundClaim(row[0], False)
 
-    def forget_inbound(self, client_id: str) -> None:
-        """Release a claim whose dispatch failed, so the client's retry is dispatched again."""
-        with self._lock:
-            self._conn.execute("DELETE FROM inbound WHERE client_id = ?", (client_id,))
-
     # -- media ----------------------------------------------------------------------------------
 
     def add_media(self, record: MediaRecord) -> None:
@@ -145,6 +155,29 @@ class Outbox:
             self._conn.execute(
                 "INSERT INTO media (id, name, mime, size, path, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (record.id, record.name, record.mime, record.size, record.path, time.time()))
+
+    def link_media(self, message_id: str, media_ids: list[str]) -> None:
+        """Remember the files of the person's message, for its history entry."""
+        with self._lock:
+            self._conn.execute("DELETE FROM message_media WHERE message_id = ?", (message_id,))
+            self._conn.executemany(
+                "INSERT INTO message_media (message_id, position, media_id) VALUES (?, ?, ?)",
+                [(message_id, position, media_id) for position, media_id in enumerate(media_ids)])
+
+    def message_media(self, message_ids: list[str]) -> dict[str, list[MediaRecord]]:
+        """The retained files of each message, in the order they were sent."""
+        if not message_ids:
+            return {}
+        marks = ",".join("?" * len(message_ids))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT l.message_id, m.id, m.name, m.mime, m.size, m.path FROM message_media l"
+                f" JOIN media m ON m.id = l.media_id WHERE l.message_id IN ({marks})"
+                " ORDER BY l.message_id, l.position", message_ids).fetchall()
+        linked: dict[str, list[MediaRecord]] = {}
+        for row in rows:
+            linked.setdefault(row[0], []).append(MediaRecord(row[1], row[2], row[3], int(row[4]), row[5]))
+        return linked
 
     def get_media(self, media_id: str) -> Optional[MediaRecord]:
         with self._lock:
@@ -162,6 +195,7 @@ class Outbox:
             paths = [row[0] for row in self._conn.execute(
                 "SELECT path FROM media WHERE created_at < ?", (media_before,)).fetchall()]
             self._conn.execute("DELETE FROM media WHERE created_at < ?", (media_before,))
+            self._conn.execute("DELETE FROM message_media WHERE media_id NOT IN (SELECT id FROM media)")
         return paths
 
 

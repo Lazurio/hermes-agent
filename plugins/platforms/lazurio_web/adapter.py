@@ -1,27 +1,28 @@
 """``lazurio_web`` adapter: the web bubble's channel to Buddy (the Hermes Agent in the owner's
-Osobní Prostředí).
+Osobní Prostředí), implementing LazurioPlatform's runtime contract ``lazurio.buddy-runtime.v1``.
 
 Inbound, every request is the owner's direct message: ``chat_id = user_id = "owner"``, ``dm``, so the
 gateway keys the conversation ``agent:main:lazurio_web:dm:owner`` and authorizes it through
-``LAZURIO_WEB_ALLOWED_USERS`` like any other platform. Outbound, every gateway call becomes one event
-in the durable outbox (``outbox.py``), and a send succeeds only once that event is committed:
+``LAZURIO_WEB_ALLOWED_USERS`` like any other platform. Outbound, every gateway call becomes events in
+the durable outbox (``outbox.py``), and a send succeeds only once they are committed:
 
-=========================================  =====================================================
-gateway call                                event
-=========================================  =====================================================
-processing starts                           ``turn.started {message_id}``, ``status {working}``
-``send`` (``expect_edits``: stream start)   ``message.delta {message_id, text}``
-``edit_message(finalize=False)``            ``message.delta`` (the whole text so far, no cursor)
-``send`` / ``edit_message(finalize=True)``  ``message.final {message_id, text, media: []}``
-``send_image_file`` / ``send_document`` …   ``message.final`` with ``media: [{id, kind, …}]``
-``set_status_text`` (live tool status)      ``progress {text}`` (``""`` clears it)
-``send_clarify``                            ``clarify.request {clarify_id, question, choices, multi}``
-clarify answered, expired or retired        ``clarify.retired {clarify_id}``
-processing ends                             ``error {code}`` on failure, ``status {idle}``
-=========================================  =====================================================
+=========================================  ======================================================
+gateway call                                events
+=========================================  ======================================================
+a message arrives                           ``message.final`` of the person's message (``client_id``)
+processing starts                           ``turn.started {reply_to}``, ``status working``
+``send`` with ``expect_edits``, edits       ``message.delta``: each new stable piece of the answer
+``send`` / ``edit_message(finalize=True)``  ``message.final`` of Buddy's answer (``client_id`` null)
+``send_image_file``, ``send_document`` …    ``message.final`` with ``media``
+``set_status_text`` (live tool status)      ``progress {text}``
+``send_clarify``                            ``clarify.request``, ``status waiting``
+the question ends, however                  ``clarify.retired``, ``status working``
+processing ends                             ``error turn-failed`` on failure, ``status idle``
+=========================================  ======================================================
 
-``message.delta`` carries the full text so far rather than an increment: the stream consumer edits
-with whole snapshots, and a replayed or dropped frame then never corrupts what the client shows.
+The stream consumer edits with whole snapshots that end in a cursor and may close an open code
+fence that later moves. A piece is therefore what two consecutive snapshots agree on beyond what was
+already sent: never the cursor, never a synthetic fence. ``message.final`` replaces the pieces.
 """
 
 from __future__ import annotations
@@ -40,19 +41,15 @@ import uuid
 from collections import OrderedDict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
-from gateway.config import DEFAULT_STREAMING_CURSOR, Platform, PlatformConfig
 from gateway.platforms._shared import coerce_port, extra_or_secret
 from gateway.platforms.base import BasePlatformAdapter, SendResult, cache_media_bytes_async
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
+from gateway.config import Platform, PlatformConfig
 
-from . import clarify, history, page_context
-from .errors import ApiError
+from . import clarify, history, page_context, wire
 from .outbox import EventHub, InboundClaim, MediaRecord, Outbox
-
-if TYPE_CHECKING:
-    from .http_api import InboundMessage
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +58,8 @@ OWNER = "owner"
 CHAT_NAME = "Lazurio web"
 LISTEN_HOST = "127.0.0.1"
 MIN_SECRET_BYTES = 32
-# Every event stream ends by then, so each reconnect passes the gateway route (and its session
-# check) again; the contract caps a stream at 110 s.
+# Every event stream ends by then, so each reconnect passes the gateway's admission again; the
+# contract caps a stream at 110 s.
 STREAM_MAX_SECONDS = 100.0
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
 EVENT_RETENTION_SECONDS = 3 * 24 * 3600
@@ -70,9 +67,8 @@ INBOUND_RETENTION_SECONDS = 7 * 24 * 3600
 MEDIA_RETENTION_SECONDS = 7 * 24 * 3600
 PRUNE_INTERVAL_SECONDS = 3600.0
 CLARIFY_POLL_SECONDS = 0.5
-_RETIRED_MEMORY = 256
-_FINALS_MEMORY = 256
-_DISPATCHED_MEMORY = 1024
+_FINALS_SCAN = 200  # recent message.final events history matches Buddy's replies against
+_MEMORY = 1024  # bounded per-message bookkeeping
 
 
 class SecretFileError(ValueError):
@@ -81,7 +77,7 @@ class SecretFileError(ValueError):
 
 def read_secret_file(path: str) -> bytes:
     """The bearer secret from ``path``: a regular file of the gateway's user, mode 0600 or stricter,
-    at least ``MIN_SECRET_BYTES`` of visible ASCII. Anything else refuses to start the channel."""
+    one line of at least ``MIN_SECRET_BYTES`` visible ASCII. Anything else refuses the channel."""
     if not path:
         raise SecretFileError("no secret file configured (extra.secret_file or LAZURIO_WEB_SECRET_FILE)")
     target = Path(path).expanduser()
@@ -101,6 +97,30 @@ def read_secret_file(path: str) -> bytes:
     return secret
 
 
+def _remember(store: OrderedDict, key: str, value: Any) -> None:
+    store[key] = value
+    store.move_to_end(key)
+    while len(store) > _MEMORY:
+        store.popitem(last=False)
+
+
+def _common_prefix(left: str, right: str) -> int:
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
+
+
+def _file_name(name: str) -> str:
+    clean = wire.clean_line(name.replace("/", "_").replace("\\", "_"), wire.NAME_LENGTH)
+    return clean if clean not in ("", ".", "..") else "file"
+
+
+def _media_item(record: MediaRecord) -> dict[str, Any]:
+    return {"media_id": record.id, "name": record.name, "mime": record.mime, "size": record.size}
+
+
 def _media_message_type(kinds: list[str]) -> MessageType:
     if not kinds:
         return MessageType.TEXT
@@ -108,9 +128,9 @@ def _media_message_type(kinds: list[str]) -> MessageType:
 
 
 class LazurioWebAdapter(BasePlatformAdapter):
-    MAX_MESSAGE_LENGTH = 32_000
+    MAX_MESSAGE_LENGTH = wire.TEXT_LENGTH
     # The finalize edit is the only signal that a streamed message is complete (``message.final``),
-    # so the consumer must send it even when the text did not change since the last delta.
+    # so the consumer must send it even when the text did not change since the last edit.
     REQUIRES_EDIT_FINALIZE = True
     supports_code_blocks = True
     # The live tool status (``set_status_text``) feeds the bubble's one-line progress indicator.
@@ -121,7 +141,8 @@ class LazurioWebAdapter(BasePlatformAdapter):
         extra = config.extra or {}
         self.listen_port = coerce_port(extra.get("listen_port"), 0)
         self._secret_file = str(extra_or_secret(extra, "secret_file", "LAZURIO_WEB_SECRET_FILE") or "")
-        self.secret = b""
+        self._secret = b""
+        self._secret_stamp: Optional[tuple[int, ...]] = None
         self.outbox: Optional[Outbox] = None
         self.hub = EventHub()
         self.stream_max_seconds = STREAM_MAX_SECONDS
@@ -130,9 +151,11 @@ class LazurioWebAdapter(BasePlatformAdapter):
         self._state = "idle"
         self._progress_lock = threading.Lock()
         self._last_progress = ""
+        self._cards: dict[str, clarify.Card] = {}  # open questions, by clarify_id
         self._clarify_watchers: dict[str, asyncio.Task] = {}
         self._retired: OrderedDict[str, None] = OrderedDict()
-        self._finals: OrderedDict[str, str] = OrderedDict()
+        self._finals: OrderedDict[str, str] = OrderedDict()  # message_id -> last final text
+        self._streams: OrderedDict[str, tuple[str, int]] = OrderedDict()  # message_id -> (snapshot, sent)
         self._intake_lock = asyncio.Lock()
         self._dispatched: OrderedDict[str, None] = OrderedDict()  # message ids this process dispatched
         self._prune_task: Optional[asyncio.Task] = None
@@ -144,6 +167,24 @@ class LazurioWebAdapter(BasePlatformAdapter):
         self._set_fatal_error(code, message, retryable=retryable)
         return False
 
+    @property
+    def secret(self) -> bytes:
+        """The current secret. Machines may rotate the file; a changed file is read again, and one
+        that turned unsafe locks the API (401 for everyone) until it is fixed."""
+        try:
+            info = os.lstat(Path(self._secret_file).expanduser())
+            stamp = (info.st_ino, info.st_mtime_ns, info.st_size, info.st_mode, info.st_uid)
+        except OSError:
+            return b""
+        if stamp != self._secret_stamp:
+            try:
+                self._secret = read_secret_file(self._secret_file)
+            except (SecretFileError, OSError):
+                logger.error("[%s] the secret file is no longer usable; refusing every request", self.name)
+                self._secret = b""
+            self._secret_stamp = stamp
+        return self._secret
+
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         try:
             from aiohttp import web
@@ -153,7 +194,7 @@ class LazurioWebAdapter(BasePlatformAdapter):
         if not 0 < self.listen_port < 65536:
             return self._fatal("lazurio_web_config", "extra.listen_port must be a TCP port", retryable=False)
         try:
-            self.secret = await asyncio.to_thread(read_secret_file, self._secret_file)
+            await asyncio.to_thread(read_secret_file, self._secret_file)
         except (SecretFileError, OSError) as exc:
             return self._fatal("lazurio_web_secret", str(exc), retryable=False)
         from hermes_constants import get_hermes_home
@@ -230,7 +271,7 @@ class LazurioWebAdapter(BasePlatformAdapter):
         """A turn that was running when the gateway stopped never reported its end."""
         last = await asyncio.to_thread(self.outbox.last_of_type, "status")
         self._state = "idle"
-        if last is not None and last.data.get("state") == "working":
+        if last is not None and last.data.get("state") != "idle":
             await self._emit("status", {"state": "idle"})
 
     # -- outbox ---------------------------------------------------------------------------------
@@ -266,59 +307,77 @@ class LazurioWebAdapter(BasePlatformAdapter):
 
     # -- outbound -------------------------------------------------------------------------------
 
-    def _strip_cursor(self, text: str) -> str:
-        streaming = getattr(getattr(self.gateway_runner, "config", None), "streaming", None)
-        cursor = getattr(streaming, "cursor", None) if streaming is not None else DEFAULT_STREAMING_CURSOR
-        return text[: -len(cursor)] if cursor and text.endswith(cursor) else text
+    @staticmethod
+    def _final(message_id: str, text: str, *, role: str = "assistant", media: Optional[list] = None,
+               client_id: Optional[str] = None) -> dict[str, Any]:
+        return {"message_id": message_id, "role": role, "text": wire.clean_text(text), "at": wire.instant(),
+                "via": PLATFORM, "media": media or [], "client_id": client_id}
 
-    def _message_event(self, message_id: str, text: str, *, final: bool) -> tuple[str, dict[str, Any]]:
-        if final:
-            return "message.final", {"message_id": message_id, "text": text, "media": []}
-        return "message.delta", {"message_id": message_id, "text": self._strip_cursor(text)}
-
-    async def _send_message_event(self, message_id: str, text: str, *, final: bool) -> SendResult:
+    async def _send_final(self, message_id: str, text: str) -> SendResult:
         # REQUIRES_EDIT_FINALIZE makes the consumer finalize even an unchanged message, and at the
         # end of a turn it may do so twice: one ``message.final`` per (message, text) is enough.
-        if final and self._finals.get(message_id) == text:
+        if self._finals.get(message_id) == text:
             return SendResult(success=True, message_id=message_id)
-        event_type, data = self._message_event(message_id, text, final=final)
-        result = await self._deliver(event_type, data, message_id)
-        if final and result.success:
-            self._finals[message_id] = text
-            while len(self._finals) > _FINALS_MEMORY:
-                self._finals.popitem(last=False)
+        self._streams.pop(message_id, None)
+        result = await self._deliver("message.final", self._final(message_id, text), message_id)
+        if result.success:
+            _remember(self._finals, message_id, text)
+        return result
+
+    async def _send_piece(self, message_id: str, snapshot: str) -> SendResult:
+        """Emit what this snapshot and the previous one agree on beyond the pieces already sent."""
+        previous, sent = self._streams.get(message_id, ("", 0))
+        stable = _common_prefix(previous, snapshot)
+        piece = wire.clean_text(snapshot[sent:stable]) if stable > sent else ""
+        if not piece.strip():  # blank so far: it rides along with the next piece
+            _remember(self._streams, message_id, (snapshot, sent))
+            return SendResult(success=True, message_id=message_id)
+        result = await self._deliver("message.delta", {"message_id": message_id, "text": piece}, message_id)
+        _remember(self._streams, message_id, (snapshot, stable if result.success else sent))
         return result
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
                    metadata: Optional[dict[str, Any]] = None) -> SendResult:
-        final = not (metadata or {}).get("expect_edits")
-        return await self._send_message_event(uuid.uuid4().hex, content or "", final=final)
+        text = content or ""
+        if (metadata or {}).get("expect_edits"):
+            return await self._send_piece(uuid.uuid4().hex, text)
+        chunks = self.truncate_message(text, wire.TEXT_LENGTH) if len(text) > wire.TEXT_LENGTH else [text]
+        sent: list[str] = []
+        for chunk in chunks:
+            result = await self._send_final(uuid.uuid4().hex, chunk)
+            if not result.success:
+                return result
+            sent.append(result.message_id)
+        return SendResult(success=True, message_id=sent[-1], continuation_message_ids=tuple(sent[:-1]))
 
     async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False,
                            metadata: Optional[dict[str, Any]] = None) -> SendResult:
-        return await self._send_message_event(str(message_id), content or "", final=finalize)
+        if finalize:
+            return await self._send_final(str(message_id), content or "")
+        return await self._send_piece(str(message_id), content or "")
 
     def set_status_text(self, chat_id: str, text: Optional[str]) -> None:
-        """Runs on the agent's worker thread (``TurnRunner._progress_live_status``)."""
+        """Runs on the agent's worker thread (``TurnRunner._progress_live_status``). The contract's
+        progress is one non-blank line; a cleared status sends nothing."""
         super().set_status_text(chat_id, text)
-        value = (text or "").strip()
+        line = wire.clean_line(text or "", wire.PROGRESS_LENGTH)
         with self._progress_lock:
-            if value == self._last_progress:
+            if not line or line == self._last_progress:
                 return
-            self._last_progress = value
+            self._last_progress = line
         try:
-            self._emit_now("progress", {"text": value})
+            self._emit_now("progress", {"text": line})
         except Exception:
             logger.debug("[%s] progress event dropped", self.name, exc_info=True)
 
     async def send_clarify(self, chat_id: str, question: str, choices: Optional[list], clarify_id: str,
                            session_key: str, metadata: Optional[dict[str, Any]] = None) -> SendResult:
         entry = clarify.open_entry(clarify_id)
-        data = {"clarify_id": clarify_id, "question": clarify.visible_question(question),
-                "choices": [str(choice) for choice in choices or []],
-                "multi": bool(getattr(entry, "multi_select", False))}
-        result = await self._deliver("clarify.request", data, clarify_id)
+        shown = clarify.card(clarify_id, question, choices, bool(getattr(entry, "multi_select", False)))
+        result = await self._deliver("clarify.request", shown.request, clarify_id)
         if result.success:
+            self._cards[clarify_id] = shown
+            await self._set_state("waiting")
             self._watch_clarify(clarify_id)
         return result
 
@@ -341,81 +400,85 @@ class LazurioWebAdapter(BasePlatformAdapter):
     async def _retire(self, clarify_id: str) -> None:
         if clarify_id in self._retired:
             return
-        self._retired[clarify_id] = None
-        while len(self._retired) > _RETIRED_MEMORY:
-            self._retired.popitem(last=False)
+        _remember(self._retired, clarify_id, None)
+        self._cards.pop(clarify_id, None)
         try:
             await self._emit("clarify.retired", {"clarify_id": clarify_id})
+            if self._state == "waiting" and not self._cards:
+                await self._set_state("working")
         except Exception:
             logger.warning("[%s] could not record clarify.retired for %s", self.name, clarify_id, exc_info=True)
 
-    def _store_media(self, path: str, file_name: Optional[str]) -> MediaRecord:
-        source = Path(path)
+    def _store_media(self, source: Path, name: str, mime: Optional[str] = None) -> MediaRecord:
+        """Copy a file into the channel's own store: the original may live in a cache Hermes cleans
+        up before the client fetched it."""
         info = source.stat()
         if not stat.S_ISREG(info.st_mode):
             raise ValueError("not a regular file")
         if info.st_size > MAX_MEDIA_BYTES:
             raise ValueError(f"file is larger than {MAX_MEDIA_BYTES} bytes")
-        name = Path(file_name or source.name).name or "file"
+        name = _file_name(name or source.name)
+        guessed = mime or mimetypes.guess_type(name)[0] or "application/octet-stream"
         media_id = uuid.uuid4().hex
         target = self._media_dir / f"{media_id}{source.suffix.lower()[:16]}"
         shutil.copyfile(source, target)
         os.chmod(target, 0o600)
-        record = MediaRecord(media_id, name, mimetypes.guess_type(name)[0] or "application/octet-stream",
-                             info.st_size, str(target))
+        record = MediaRecord(media_id, name, guessed.lower(), info.st_size, str(target))
         self.outbox.add_media(record)
         return record
 
-    async def _send_file(self, kind: str, path: str, caption: Optional[str],
-                         file_name: Optional[str] = None) -> SendResult:
-        """A file Buddy sends is copied into the channel's own store first: the original may live
-        in a cache Hermes cleans up while the client has not fetched it yet."""
+    async def _send_file(self, path: str, caption: Optional[str], file_name: Optional[str] = None) -> SendResult:
         if self.outbox is None or self._media_dir is None:
             return SendResult(success=False, error="lazurio_web is not connected", retryable=True)
         try:
-            record = await asyncio.to_thread(self._store_media, path, file_name)
-        except (OSError, ValueError) as exc:
-            logger.warning("[%s] cannot hand %s to the web client: %s", self.name, kind, exc)
+            record = await asyncio.to_thread(self._store_media, Path(path), file_name or Path(path).name)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            logger.warning("[%s] cannot hand a file to the web client: %s", self.name, exc)
             return SendResult(success=False, error=str(exc))
         message_id = uuid.uuid4().hex
-        media = [{"id": record.id, "kind": kind, "name": record.name, "mime": record.mime, "size": record.size}]
-        return await self._deliver(
-            "message.final", {"message_id": message_id, "text": caption or "", "media": media}, message_id)
+        data = self._final(message_id, caption or "", media=[_media_item(record)])
+        return await self._deliver("message.final", data, message_id)
 
     async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None,
                               reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None,
                               **kwargs) -> SendResult:
-        return await self._send_file("image", image_path, caption)
+        return await self._send_file(image_path, caption)
 
     async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
                             file_name: Optional[str] = None, reply_to: Optional[str] = None,
                             metadata: Optional[dict[str, Any]] = None, **kwargs) -> SendResult:
-        return await self._send_file("file", file_path, caption, file_name)
+        return await self._send_file(file_path, caption, file_name)
 
     async def send_voice(self, chat_id: str, audio_path: str, caption: Optional[str] = None,
                          reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None,
                          **kwargs) -> SendResult:
-        return await self._send_file("audio", audio_path, caption)
+        return await self._send_file(audio_path, caption)
 
     async def send_video(self, chat_id: str, video_path: str, caption: Optional[str] = None,
                          reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None,
                          **kwargs) -> SendResult:
-        return await self._send_file("video", video_path, caption)
+        return await self._send_file(video_path, caption)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": CHAT_NAME, "type": "dm", "chat_id": chat_id}
 
     # -- processing lifecycle -------------------------------------------------------------------
 
+    @staticmethod
+    def _reply_to(event: MessageEvent) -> Optional[str]:
+        """The person's message a turn answers; null for a turn Buddy starts himself (a wake)."""
+        message_id = str(event.message_id or "")
+        return message_id if not event.internal and wire.is_id(message_id) else None
+
     async def on_processing_start(self, event: MessageEvent) -> None:
-        await self._emit("turn.started", {"message_id": str(event.message_id or "")})
+        await self._emit("turn.started", {"reply_to": self._reply_to(event)})
         await self._set_state("working")
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         with self._progress_lock:
             self._last_progress = ""
         if outcome == ProcessingOutcome.FAILURE:
-            await self._emit("error", {"code": "turn_failed"})
+            await self._emit("error", {"code": "turn-failed", "message_id": self._reply_to(event)})
         await self._set_state("idle")
 
     # -- inbound (called by http_api) -----------------------------------------------------------
@@ -428,26 +491,26 @@ class LazurioWebAdapter(BasePlatformAdapter):
         return self._source_session_key(self._owner_source())
 
     def _require_owner(self) -> None:
-        if self._message_handler is None:
-            raise ApiError(503, "not_ready", "the gateway is not accepting messages yet")
-        if self._is_sender_authorized(OWNER, "dm", OWNER) is False:
-            raise ApiError(403, "forbidden_user", "the owner is not allowed: set LAZURIO_WEB_ALLOWED_USERS=owner")
+        """The gateway does not take messages yet, or its allowlist does not admit the owner
+        (``LAZURIO_WEB_ALLOWED_USERS=owner``): either way the agent does not run for this channel."""
+        if self._message_handler is None or self._is_sender_authorized(OWNER, "dm", OWNER) is False:
+            raise wire.refuse("unavailable")
 
-    async def _build_event(self, inbound: InboundMessage, message_id: str) -> MessageEvent:
-        media_urls: list[str] = []
-        media_types: list[str] = []
-        kinds: list[str] = []
-        for item in inbound.attachments:
-            cached = await cache_media_bytes_async(item.data, filename=Path(item.name).name, mime_type=item.mime)
+    async def _intake_files(self, inbound: wire.InboundMessage) -> tuple[list, list[str], list[str], list[str]]:
+        """``(media items, hermes paths, mime types, kinds)``: each file cached for the turn and kept
+        in the channel's store for every tab and the history."""
+        items, paths, mimes, kinds = [], [], [], []
+        for attachment in inbound.attachments:
+            cached = await cache_media_bytes_async(attachment.data, filename=attachment.name,
+                                                   mime_type=attachment.mime)
             if cached is None:
-                raise ApiError(400, "invalid_attachment", f"{item.name} is not a valid image")
-            media_urls.append(cached.path)
-            media_types.append(cached.media_type)
+                raise wire.refuse("bad-request")  # an image that is no image
+            record = await asyncio.to_thread(self._store_media, Path(cached.path), attachment.name, attachment.mime)
+            items.append(_media_item(record))
+            paths.append(cached.path)
+            mimes.append(cached.media_type)
             kinds.append(cached.kind)
-        return MessageEvent(
-            text=inbound.text, message_type=_media_message_type(kinds), user_id=OWNER,
-            source=self._owner_source(message_id), message_id=message_id, media_urls=media_urls,
-            media_types=media_types, timestamp=datetime.now(tz=UTC))
+        return items, paths, mimes, kinds
 
     def _lineage_rows(self, session_key: str) -> list[dict[str, Any]]:
         """The conversation as displayed: root to tip across compression rotations, including rows an
@@ -468,70 +531,81 @@ class LazurioWebAdapter(BasePlatformAdapter):
     async def _claim_settled(self, claim: InboundClaim) -> bool:
         """A repeated ``client_id`` is answered without dispatch only on evidence: this process
         already handed the message to the gateway (queued or running), or Hermes persisted it. A
-        claim left behind by a gateway that died before either happened is dispatched again,
-        however old, so a retry recovers the message instead of hitting a dead claim."""
+        claim left behind by a gateway that died before either happened, or whose dispatch failed,
+        is dispatched again under the same id, so a retry recovers the message."""
         if claim.message_id in self._dispatched:
             return True
         return await asyncio.to_thread(self._in_transcript, self.owner_session_key(), claim.message_id)
 
-    async def submit_message(self, inbound: InboundMessage) -> str:
-        """Intake is serialized: a concurrent retry waits for the first attempt instead of being told
-        202 for a claim that attempt may still roll back."""
+    async def submit_message(self, inbound: wire.InboundMessage) -> str:
+        """Intake is serialized: a concurrent retry waits for the first attempt, so ``202`` always
+        names a message that was handed to the gateway."""
         self._require_owner()
         async with self._intake_lock:
             claim = await asyncio.to_thread(self.outbox.claim_inbound, inbound.client_id, uuid.uuid4().hex)
             if not claim.created and await self._claim_settled(claim):
                 return claim.message_id
-            try:
-                event = await self._build_event(inbound, claim.message_id)
-                block = page_context.render(page_context.validate(inbound.context))
-                if block:
-                    page_context.STORE.put(claim.message_id, block)
-                await self.handle_message(event)
-            except BaseException:
-                if claim.created:
-                    await asyncio.to_thread(self.outbox.forget_inbound, inbound.client_id)
-                raise
-            self._dispatched[claim.message_id] = None
-            while len(self._dispatched) > _DISPATCHED_MEMORY:
-                self._dispatched.popitem(last=False)
-            return claim.message_id
+            message_id = claim.message_id
+            items, paths, mimes, kinds = await self._intake_files(inbound)
+            await asyncio.to_thread(self.outbox.link_media, message_id, [item["media_id"] for item in items])
+            if inbound.context is not None:
+                page_context.STORE.put(message_id, page_context.render(inbound.context))
+            # The person's own message, for every open tab, before its turn can start.
+            await self._emit("message.final", self._final(
+                message_id, inbound.text, role="user", media=items, client_id=inbound.client_id))
+            await self.handle_message(MessageEvent(
+                text=inbound.text, message_type=_media_message_type(kinds), user_id=OWNER,
+                source=self._owner_source(message_id), message_id=message_id, media_urls=paths,
+                media_types=mimes, timestamp=datetime.now(tz=UTC)))
+            _remember(self._dispatched, message_id, None)
+            return message_id
 
-    async def request_stop(self) -> dict[str, Any]:
-        """``/stop`` through the gateway's own command path, so it behaves as typed on Telegram."""
+    async def request_stop(self) -> None:
+        """``/stop`` through the gateway's own command path, as typed on Telegram; nothing when no
+        turn runs (the answer is ``202 {}`` either way)."""
         self._require_owner()
         if self.owner_session_key() not in self._active_sessions:
-            return {"stopped": False}
+            return
         message_id = uuid.uuid4().hex
         await self.handle_message(MessageEvent(
             text="/stop", message_type=MessageType.COMMAND, user_id=OWNER,
             source=self._owner_source(message_id), message_id=message_id))
-        return {"stopped": True}
 
-    async def answer_clarify(self, clarify_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    async def answer_clarify(self, clarify_id: str, kind: str, value: Any) -> None:
+        """``404 not-found`` for no such question here, ``409 conflict`` for one answered or retired."""
         from tools.clarify_gateway import resolve_gateway_clarify
 
         self._require_owner()
-        entry = clarify.open_entry(clarify_id)
-        if entry is None or entry.session_key != self.owner_session_key():
-            if clarify_id in self._clarify_watchers:
-                await self._retire(clarify_id)
-            raise ApiError(404, "unknown_clarify", "the question is no longer open")
-        value = clarify.answer_value(entry, body)
-        if not resolve_gateway_clarify(clarify_id, value):
-            raise ApiError(409, "already_answered", "the question was answered or expired meanwhile")
+        entry, shown = clarify.open_entry(clarify_id), self._cards.get(clarify_id)
+        if entry is None or shown is None or entry.session_key != self.owner_session_key():
+            raise wire.refuse("conflict" if clarify_id in self._retired else "not-found")
+        if not resolve_gateway_clarify(clarify_id, clarify.answer_value(entry, shown, kind, value)):
+            raise wire.refuse("conflict")
         await self._retire(clarify_id)
-        return {"resolved": True}
 
     def _history_page(self, session_key: str, before: Optional[int], limit: int):
-        return history.page(self._lineage_rows(session_key), before, limit)
+        outbox = self.outbox
+
+        def media_for(message_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+            linked = outbox.message_media(message_ids)
+            return {key: [_media_item(record) for record in records if os.path.isfile(record.path)]
+                    for key, records in linked.items()}
+
+        return history.page(self._lineage_rows(session_key), before, limit,
+                            finals=outbox.recent_assistant_finals(_FINALS_SCAN), media_for=media_for)
 
     async def read_history(self, before: Optional[int], limit: int) -> dict[str, Any]:
-        """``last_event_id`` is read BEFORE the transcript: replaying from it may repeat a reply the
-        page already holds (the client drops it by text), but never skips one."""
-        last_event_id = await asyncio.to_thread(self.outbox.last_id)
-        messages, next_before = await asyncio.to_thread(self._history_page, self.owner_session_key(), before, limit)
-        return {"messages": messages, "next_before": next_before, "last_event_id": last_event_id}
+        """Only the newest page carries the snapshot, and its ``event_id`` is read BEFORE the
+        transcript: the events after it may repeat a reply the page holds (same ``message_id``, so
+        the client keeps one) but never miss one."""
+        snapshot = None
+        if before is None:
+            event_id = await asyncio.to_thread(self.outbox.last_id)
+            open_cards = [card.request for card in self._cards.values()]
+            snapshot = {"event_id": str(event_id), "state": self._state,
+                        "clarify": open_cards[-1] if open_cards else None}
+        messages, cursor = await asyncio.to_thread(self._history_page, self.owner_session_key(), before, limit)
+        return {"messages": messages, "before": cursor, "snapshot": snapshot}
 
     def _existing_media(self, media_id: str) -> Optional[MediaRecord]:
         record = self.outbox.get_media(media_id)
