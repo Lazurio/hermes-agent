@@ -325,15 +325,20 @@ class LazurioWebAdapter(BasePlatformAdapter):
         return result
 
     async def _send_piece(self, message_id: str, snapshot: str) -> SendResult:
-        """Emit what this snapshot and the previous one agree on beyond the pieces already sent."""
+        """Emit what this snapshot and the previous one agree on beyond the pieces already sent. A
+        repeated snapshot adds nothing (its cursor and closing fence did not move), and a piece that
+        could not be committed leaves the state as it was, so the retry sends the same piece."""
         previous, sent = self._streams.get(message_id, ("", 0))
+        if snapshot == previous:
+            return SendResult(success=True, message_id=message_id)
         stable = _common_prefix(previous, snapshot)
         piece = wire.clean_text(snapshot[sent:stable]) if stable > sent else ""
         if not piece.strip():  # blank so far: it rides along with the next piece
             _remember(self._streams, message_id, (snapshot, sent))
             return SendResult(success=True, message_id=message_id)
         result = await self._deliver("message.delta", {"message_id": message_id, "text": piece}, message_id)
-        _remember(self._streams, message_id, (snapshot, stable if result.success else sent))
+        if result.success:
+            _remember(self._streams, message_id, (snapshot, stable))
         return result
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,

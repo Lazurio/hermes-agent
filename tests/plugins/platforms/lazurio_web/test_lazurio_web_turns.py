@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,34 @@ async def test_a_streamed_reply_arrives_as_stable_pieces_then_one_final(web):
     assert (final["data"]["text"], final["data"]["role"], final["data"]["client_id"]) == (answer, "assistant", None)
     assert {piece["data"]["message_id"] for piece in pieces} == {message_id}
     assert consumer.final_response_sent is True
+
+
+@pytest.mark.asyncio
+async def test_a_piece_that_was_not_committed_is_sent_again_without_the_cursor(web, monkeypatch):
+    """A failed commit leaves the stream as it was. The retry of the same snapshot sends the same
+    piece, not the snapshot's cursor and closing fence, which did not move."""
+    async with web.running() as rig:
+        adapter, outbox = rig.adapter, rig.adapter.outbox
+        start, append, attempts = outbox.last_id(), outbox.append, []
+
+        def fails_once(event_type, data):
+            attempts.append(event_type)
+            if len(attempts) == 1:
+                raise sqlite3.OperationalError("disk I/O error")
+            return append(event_type, data)
+
+        message_id = (await adapter.send("owner", "Tady ▉", metadata={"expect_edits": True})).message_id
+        monkeypatch.setattr(outbox, "append", fails_once)
+        snapshot = "Tady je oprava:\n```py\nprint( ▉\n```"
+        assert (await adapter.edit_message("owner", message_id, snapshot)).retryable
+        assert (await adapter.edit_message("owner", message_id, snapshot)).success
+        assert (await adapter.edit_message("owner", message_id, "Tady je oprava:\n```py\nprint('ahoj') ▉\n```")).success
+        assert (await adapter.edit_message("owner", message_id, "Tady je oprava:\n```py\nprint('ahoj')\n```",
+                                           finalize=True)).success
+        events = await web.read_events(rig.client, rig.base, after=start,
+                                       until=lambda evs: any(e["type"] == "message.final" for e in evs))
+    pieces = [event["data"]["text"] for event in web.of_type(events, "message.delta")]
+    assert pieces == ["Tady ", "je oprava:\n```py\nprint("]
 
 
 # -- clarify -----------------------------------------------------------------------------------

@@ -27,7 +27,6 @@ from urllib.parse import quote
 from aiohttp import web
 
 from . import wire
-from .errors import ApiError
 from .outbox import OutboxEvent
 
 if TYPE_CHECKING:
@@ -87,7 +86,7 @@ def make_guard(api: LazurioWebAdapter):
             return error_response("unauthorized")
         try:
             return await handler(request)
-        except ApiError as exc:
+        except wire.ApiError as exc:
             return error_response(exc.code)
         except web.HTTPException as exc:
             return error_response(_ROUTE_ERRORS.get(exc.status, "bad-request"))

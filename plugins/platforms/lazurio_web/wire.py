@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Optional
 
-from .errors import ApiError
 from . import page_context
 
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
@@ -27,7 +26,6 @@ ATTACHMENTS = 4
 ATTACHMENT_BYTES = 5 * 1024 * 1024
 ATTACHMENTS_BYTES = 10 * 1024 * 1024
 NAME_LENGTH = 255
-MEDIA_PER_MESSAGE = 16
 HISTORY_LIMIT_DEFAULT = 30
 HISTORY_LIMIT_MAX = 100
 QUESTION_LENGTH = 2_000
@@ -49,8 +47,16 @@ _MESSAGE_KEYS = {"client_id", "text", "attachments", "context"}
 _ATTACHMENT_KEYS = {"name", "mime", "data_base64"}
 
 
+class ApiError(Exception):
+    """A refused request: the API answers ``{"error": {"code"}}`` with the code's status."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code, self.status = code, STATUS[code]
+
+
 def refuse(code: str) -> ApiError:
-    return ApiError(STATUS[code], code)
+    return ApiError(code)
 
 
 def is_id(value: Any) -> bool:
