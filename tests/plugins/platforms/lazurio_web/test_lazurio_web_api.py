@@ -595,6 +595,52 @@ async def test_a_reply_on_the_page_is_the_one_the_stream_delivered(web, tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("its_row_is_read", [True, False], ids=["persisted between the reads", "delivered before its row"])
+async def test_a_newer_identical_reply_never_lends_its_id_to_an_older_row(web, tmp_path, monkeypatch, its_row_is_read):
+    """Review finding: rows took events by text alone, newest first. A second „Hotovo.“ delivered
+    while the page was read gave its id to the first reply's row, and the client then dropped the
+    new reply as one it already showed."""
+    async with web.running() as rig:
+        adapter, outbox = rig.adapter, rig.adapter.outbox
+        db = _transcript_store(adapter, tmp_path, ("user", "Uděláš to?", "m-1"))
+        db.append_message("s1", "assistant", content="Hotovo.\n")
+        first = await adapter.send("owner", "Hotovo.\n")
+        read_finals = outbox.recent_assistant_finals
+
+        def a_second_reply_arrives_while_the_page_is_read(limit):
+            if its_row_is_read:  # the events are read, then the second reply is persisted and delivered
+                finals = read_finals(limit)
+            db.append_message("s1", "user", content="A teď?", platform_message_id="m-2")
+            if its_row_is_read:
+                db.append_message("s1", "assistant", content="Hotovo.\n")
+            adapter._emit_now("message.final", adapter._final("second-reply", "Hotovo.\n"))
+            return finals if its_row_is_read else read_finals(limit)
+
+        monkeypatch.setattr(outbox, "recent_assistant_finals", a_second_reply_arrives_while_the_page_is_read)
+        async with rig.client.get(f"{rig.base}/v1/history") as resp:
+            page = await resp.json()
+        replay = await web.read_events(rig.client, rig.base, after=page["snapshot"]["event_id"],
+                                       until=lambda evs: len(evs) == 1)
+    db.close()
+    shown = [m["message_id"] for m in page["messages"] if m["role"] == "assistant"]
+    assert shown[0] == first.message_id and "second-reply" not in shown  # the client shows the new reply
+    assert [(e["type"], e["data"]["message_id"]) for e in replay] == [("message.final", "second-reply")]
+
+
+@pytest.mark.asyncio
+async def test_an_old_reply_whose_event_is_gone_keeps_its_row_id(web, tmp_path):
+    """A row never takes an event delivered long after it was persisted, even with the same text."""
+    async with web.running() as rig:
+        db = _transcript_store(rig.adapter, tmp_path, ("user", "Uděláš to?", "m-1"))
+        db.append_message("s1", "assistant", content="Hotovo.", timestamp=time.time() - 3600)
+        await rig.adapter.send("owner", "Hotovo.")  # a new reply whose row is not persisted yet
+        async with rig.client.get(f"{rig.base}/v1/history") as resp:
+            page = await resp.json()
+    db.close()
+    assert page["messages"][-1]["message_id"].startswith("h")
+
+
+@pytest.mark.asyncio
 async def test_a_cursor_that_names_no_visible_row_is_not_found(web, tmp_path):
     """Review finding: a numeric cursor never minted here fell back to id order, so it repeated the
     newest messages or ended the conversation early instead of failing."""

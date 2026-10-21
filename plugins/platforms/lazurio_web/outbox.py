@@ -118,14 +118,15 @@ class Outbox:
             row = self._conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'events'").fetchone()
         return int(row[0]) if row else 0
 
-    def recent_assistant_finals(self, limit: int) -> list[tuple[str, str]]:
-        """``(message_id, text)`` of Buddy's newest ``message.final`` events, newest first."""
+    def recent_assistant_finals(self, limit: int) -> list[tuple[str, str, float]]:
+        """``(message_id, text, delivered_at)`` of Buddy's ``message.final`` events among the newest
+        ``limit``, oldest first."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT data FROM events WHERE type = 'message.final' ORDER BY id DESC LIMIT ?",
+                "SELECT data, created_at FROM events WHERE type = 'message.final' ORDER BY id DESC LIMIT ?",
                 (limit,)).fetchall()
-        finals = (json.loads(row[0]) for row in rows)
-        return [(final["message_id"], final["text"]) for final in finals if final.get("role") == "assistant"]
+        finals = [(json.loads(row[0]), float(row[1])) for row in reversed(rows)]
+        return [(final["message_id"], final["text"], at) for final, at in finals if final.get("role") == "assistant"]
 
     def last_of_type(self, event_type: str) -> Optional[OutboxEvent]:
         with self._lock:

@@ -596,8 +596,10 @@ class LazurioWebAdapter(BasePlatformAdapter):
             return {key: [_media_item(record) for record in records if os.path.isfile(record.path)]
                     for key, records in linked.items()}
 
-        return history.page(self._lineage_rows(session_key), before, limit,
-                            finals=outbox.recent_assistant_finals(_FINALS_SCAN), media_for=media_for)
+        # The events before the transcript: Hermes persists a reply before it delivers it, so every
+        # reply among these events already has its row in the transcript read next.
+        finals = outbox.recent_assistant_finals(_FINALS_SCAN)
+        return history.page(self._lineage_rows(session_key), before, limit, finals=finals, media_for=media_for)
 
     async def read_history(self, before: Optional[str], limit: int) -> dict[str, Any]:
         """Only the newest page carries the snapshot, and its ``event_id`` is read BEFORE the

@@ -141,7 +141,7 @@ async def test_a_question_that_ends_elsewhere_is_retired(web):
         assert (await rig.adapter.send_clarify("owner", "Ano?", ["Ano", "Ne"], "cid-typed", key)).success
         cg.clear_session(key)
         events = await web.read_events(rig.client, rig.base, after=start,
-                                       until=lambda evs: any(e["type"] == "clarify.retired" for e in evs))
+                                       until=lambda evs: len(evs) == 4)  # the retirement's status comes last
     assert [e["type"] for e in events] == ["clarify.request", "status", "clarify.retired", "status"]
 
 

@@ -127,10 +127,14 @@ the plugin takes the live status instead.)
 - **History** reads the session lineage as Hermes displays it (`include_ancestors=True,
   include_compacted=True`): compression rotations and in-place compaction keep the earlier
   conversation. The person's messages keep their `message_id` and their files. Buddy's replies take
-  the id and the exact text of the `message.final` event that delivered them, matched by text while
-  the outbox still holds it, so a reply both on the newest page and among the events after its
-  snapshot stays one message; older replies get a stable id from their row (`h<row>`) and keep their
-  text as persisted. Every message is `via` `lazurio_web` in v1. Only the newest page carries the
+  the id and the exact text of the `message.final` event that delivered them while the outbox still
+  holds it, so a reply both on the newest page and among the events after its snapshot stays one
+  message; older replies get a stable id from their row (`h<row>`) and keep their text as persisted.
+  A row and an event are matched by text, order and time together, never by text alone: Hermes
+  persists a reply right before delivering it, the adapter reads the events before the transcript,
+  and each row takes the earliest unused event after the previous match with its text, delivered
+  within ten minutes of the row. A newer reply with the same text never lends its id to an older
+  row. Every message is `via` `lazurio_web` in v1. Only the newest page carries the
   `snapshot`, whose `event_id` is read before the transcript, so nothing between the page and the
   stream is lost. A `before` that names no visible row (never minted here, or its row is no longer
   shown) is `404 not-found`, never a page guessed by id order.

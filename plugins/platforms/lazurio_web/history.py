@@ -9,9 +9,16 @@ internal notices and the injected page context stay out.
 A message is ``{message_id, role, text, at, via, media}`` (the contract's ``ConversationMessage``).
 The person's message keeps the id the API answered for it (Hermes stores it as
 ``platform_message_id``) and the files they attached. Buddy's reply takes the id and the exact text
-of the ``message.final`` event that delivered it, matched by its text while the outbox still holds
-that event, so a reply both on the newest page and replayed from the snapshot is one message, not
-two. Older replies get a stable id from their row and keep their text as persisted.
+of the ``message.final`` event that delivered it while the outbox still holds that event, so a reply
+both on the newest page and replayed from the snapshot is one message, not two. Older replies get a
+stable id from their row and keep their text as persisted.
+
+A row and an event are the same reply only by text, order and time together, never by text alone:
+Hermes persists a reply right before it delivers it (a streamed preamble shortly after its tools
+ran). The adapter reads the events before the transcript, so every reply among them already has its
+row; rows then take events oldest first, each the earliest unused event after the previous match
+with the same text, delivered within ``MATCH_WINDOW_SECONDS`` of the row. A newer reply with the same
+text therefore never lends its id to an older row and still reaches the client from the stream.
 
 A cursor is the id of the visible row that starts a page. One that names no visible row (never
 minted here, or its row is no longer shown) is ``404 not-found``, never a page guessed by id order.
@@ -30,6 +37,8 @@ from .page_context import LABEL, PLATFORM
 _MODEL_ONLY_PREFIXES = ("<memory-context>", f"{LABEL}:")
 # Recovery scaffolding persists as an untyped ``[System: …]`` user row; the dashboard hides it too.
 _SCAFFOLD_PREFIX = "[System:"
+# How far a reply's delivery may lie from its row's persistence and still be that reply.
+MATCH_WINDOW_SECONDS = 600.0
 
 
 def _visible_text(content: Any) -> str:
@@ -70,21 +79,28 @@ def _reply_key(text: str) -> str:
 
 
 def _delivered(visible: list[tuple[dict[str, Any], str]],
-               finals: list[tuple[str, str]]) -> dict[int, tuple[str, str]]:
-    """Row id -> ``(message_id, text)`` of the ``message.final`` that delivered it, newest reply to
-    newest event."""
-    unused = [(message_id, text, _reply_key(text)) for message_id, text in finals]
+               finals: list[tuple[str, str, float]]) -> dict[int, tuple[str, str]]:
+    """Row id -> ``(message_id, text)`` of the ``message.final`` that delivered it (see the module
+    docstring). ``finals`` are ``(message_id, text, delivered_at)``, oldest first."""
+    keyed = [(message_id, text, at, _reply_key(text)) for message_id, text, at in finals]
+    earliest = min((at for _, _, at, _ in keyed), default=0.0) - MATCH_WINDOW_SECONDS
     matched: dict[int, tuple[str, str]] = {}
-    for row, text in reversed(visible):
-        if not unused:
+    start = 0
+    for row, text in visible:
+        if start >= len(keyed):
             break
-        if row.get("role") != "assistant":
+        persisted = float(row.get("timestamp") or 0)
+        if row.get("role") != "assistant" or persisted < earliest:
             continue
         key = _reply_key(text)
-        hit = next((index for index, (_, _, final_key) in enumerate(unused) if final_key == key), None)
-        if hit is not None:
-            message_id, final_text, _ = unused.pop(hit)
-            matched[int(row["id"])] = (message_id, final_text)
+        for index in range(start, len(keyed)):
+            message_id, final_text, at, final_key = keyed[index]
+            if at > persisted + MATCH_WINDOW_SECONDS:
+                break
+            if final_key == key and at >= persisted - MATCH_WINDOW_SECONDS:
+                matched[int(row["id"])] = (message_id, final_text)
+                start = index + 1
+                break
     return matched
 
 
@@ -103,7 +119,7 @@ def _text(row: dict[str, Any], text: str, delivered: dict[int, tuple[str, str]])
 
 
 def page(rows: list[dict[str, Any]], before: Optional[str], limit: int, *,
-         finals: list[tuple[str, str]], media_for: Callable[[list[str]], dict[str, list[dict[str, Any]]]],
+         finals: list[tuple[str, str, float]], media_for: Callable[[list[str]], dict[str, list[dict[str, Any]]]],
          ) -> tuple[list[dict[str, Any]], Optional[str]]:
     """``(messages oldest first, cursor of the next older page or None)``. ``before`` must name a
     visible row; anything else is ``404 not-found``."""
