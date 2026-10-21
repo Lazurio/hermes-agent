@@ -573,6 +573,50 @@ async def test_history_pages_follow_the_contract(web, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delivered,persisted", [
+    ("Hotovo.\n", "Hotovo.\n"),  # a reply that ends in a newline
+    ("Hotovo.", "Hotovo.\n\n"),  # whitespace kept on one side only
+    ("    kód\nHotovo.", "    kód\nHotovo."),  # leading spaces are Markdown: never trimmed
+])
+async def test_a_reply_on_the_page_is_the_one_the_stream_delivered(web, tmp_path, delivered, persisted):
+    """Review finding: the persisted text was trimmed before it was matched with the delivered one,
+    so a reply ending in a newline got a row id and showed twice at the history/stream handoff."""
+    async with web.running() as rig:
+        db = _transcript_store(rig.adapter, tmp_path, ("user", "Hotovo?", "m-1"))
+        start = rig.adapter.outbox.last_id()
+        reply = await rig.adapter.send("owner", delivered)
+        db.append_message("s1", "assistant", content=persisted)
+        (final,) = await web.read_events(rig.client, rig.base, after=start, until=lambda evs: len(evs) == 1)
+        async with rig.client.get(f"{rig.base}/v1/history") as resp:
+            newest = (await resp.json())["messages"][-1]
+    db.close()
+    assert (newest["message_id"], newest["text"]) == (final["data"]["message_id"], final["data"]["text"])
+    assert (newest["message_id"], newest["text"]) == (reply.message_id, delivered)
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_that_names_no_visible_row_is_not_found(web, tmp_path):
+    """Review finding: a numeric cursor never minted here fell back to id order, so it repeated the
+    newest messages or ended the conversation early instead of failing."""
+    async with web.running() as rig:
+        async with rig.client.get(f"{rig.base}/v1/history?before=5") as resp:
+            assert await _error(resp) == (404, _code("not-found"))  # no conversation yet
+        db = _transcript_store(rig.adapter, tmp_path, ("user", "Ahoj", "m-1"), ("assistant", "Dobrý den.", None),
+                               ("user", "Díky", "m-2"))
+        ids = [row["id"] for row in db.get_messages("s1")]
+        async with rig.client.get(f"{rig.base}/v1/history", params={"limit": "1"}) as resp:
+            cursor = (await resp.json())["before"]
+        # below every row, above every row, not as minted, opaque
+        for unknown in ("0", str(max(ids) + 100), "0" + cursor, "c:10"):
+            async with rig.client.get(f"{rig.base}/v1/history", params={"before": unknown}) as resp:
+                assert await _error(resp) == (404, _code("not-found")), unknown
+        async with rig.client.get(f"{rig.base}/v1/history", params={"before": cursor}) as resp:
+            older = await resp.json()
+    db.close()
+    assert [m["text"] for m in older["messages"]] == ["Ahoj", "Dobrý den."] and older["before"] is None
+
+
+@pytest.mark.asyncio
 async def test_files_buddy_sends_are_listed_and_served(web, tmp_path):
     report = tmp_path / "out.pdf"
     report.write_bytes(b"%PDF-1.4 test")

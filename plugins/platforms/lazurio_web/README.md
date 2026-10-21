@@ -127,12 +127,13 @@ the plugin takes the live status instead.)
 - **History** reads the session lineage as Hermes displays it (`include_ancestors=True,
   include_compacted=True`): compression rotations and in-place compaction keep the earlier
   conversation. The person's messages keep their `message_id` and their files. Buddy's replies take
-  the id of the `message.final` event that delivered them, matched by text while the outbox still
-  holds it, so a reply both on the newest page and among the events after its snapshot stays one
-  message; older replies get a stable id from their row (`h<row>`). Every message is `via`
-  `lazurio_web` in v1. Only the newest page carries the `snapshot`, whose `event_id` is read before
-  the transcript, so nothing between the page and the stream is lost. A well-formed `before` this
-  adapter never minted is `404 not-found`.
+  the id and the exact text of the `message.final` event that delivered them, matched by text while
+  the outbox still holds it, so a reply both on the newest page and among the events after its
+  snapshot stays one message; older replies get a stable id from their row (`h<row>`) and keep their
+  text as persisted. Every message is `via` `lazurio_web` in v1. Only the newest page carries the
+  `snapshot`, whose `event_id` is read before the transcript, so nothing between the page and the
+  stream is lost. A `before` that names no visible row (never minted here, or its row is no longer
+  shown) is `404 not-found`, never a page guessed by id order.
 - **Clarify.** Choices are shown as single lines of at most 200 code points, all distinct; answers
   are mapped back to Hermes' own labels, a multi-select answer as Hermes' JSON array. `{text}` is
   „Jiné…“ and `{skip: true}` is „Přeskočit“. An answer to a question no longer open is

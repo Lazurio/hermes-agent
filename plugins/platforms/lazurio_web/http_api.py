@@ -160,10 +160,8 @@ class Handlers:
         return json_response({"message_id": await self.api.submit_message(inbound)}, 202)
 
     async def get_history(self, request: web.Request) -> web.Response:
-        before, limit = _history_query(request)
-        if before is not None and not before.isdigit():
-            raise wire.refuse("not-found")  # a well-formed cursor this adapter never minted: no such page
-        return json_response(await self.api.read_history(int(before) if before is not None else None, limit))
+        before, limit = _history_query(request)  # a cursor that names no visible row is 404
+        return json_response(await self.api.read_history(before, limit))
 
     async def post_clarify(self, request: web.Request) -> web.Response:
         kind, value = wire.clarify_answer(await _json_body(request, wire.SMALL_BODY_BYTES))

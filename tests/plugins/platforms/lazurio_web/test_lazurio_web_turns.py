@@ -252,14 +252,18 @@ def test_the_allowlist_admits_the_owner_and_rejects_a_stranger(web, registered, 
     assert runner._is_user_authorized(stranger) is False
 
 
-def test_terminal_children_see_the_originating_channel(web):
+def test_terminal_children_see_the_originating_channel(web, monkeypatch):
     """Budíček records where a delegation came from. The gateway binds the turn's channel as
     session variables and the terminal tool exports them to every child process."""
     from gateway.config import GatewayConfig
     from gateway.run import GatewayRunner
     from gateway.session import build_session_context
+    from tools.environments import local
     from tools.environments.local import _make_run_env
 
+    # The host's own Hermes install is not part of this test: looking it up reads the real Hermes
+    # home, which tests/home_io_guard.py refuses on a machine that has one.
+    monkeypatch.setattr(local, "_resolve_hermes_bin_dir", lambda: None)
     runner = object.__new__(GatewayRunner)
     tokens = runner._set_session_env(build_session_context(web.make()._owner_source("m-7"), GatewayConfig()))
     try:

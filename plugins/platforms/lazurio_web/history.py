@@ -8,10 +8,13 @@ internal notices and the injected page context stay out.
 
 A message is ``{message_id, role, text, at, via, media}`` (the contract's ``ConversationMessage``).
 The person's message keeps the id the API answered for it (Hermes stores it as
-``platform_message_id``) and the files they attached. Buddy's reply takes the id of the
-``message.final`` event that delivered it, matched by its text while the outbox still holds that
-event, so a reply both on the newest page and replayed from the snapshot is one message, not two.
-Older replies get a stable id from their row.
+``platform_message_id``) and the files they attached. Buddy's reply takes the id and the exact text
+of the ``message.final`` event that delivered it, matched by its text while the outbox still holds
+that event, so a reply both on the newest page and replayed from the snapshot is one message, not
+two. Older replies get a stable id from their row and keep their text as persisted.
+
+A cursor is the id of the visible row that starts a page. One that names no visible row (never
+minted here, or its row is no longer shown) is ``404 not-found``, never a page guessed by id order.
 """
 
 from __future__ import annotations
@@ -43,7 +46,8 @@ def _visible_text(content: Any) -> str:
 
 
 def _visible(rows: list[dict[str, Any]]) -> list[tuple[dict[str, Any], str]]:
-    """``(row, text)`` of every row the person saw, in display order."""
+    """``(row, text)`` of every row the person saw, in display order, the text as persisted. Blank
+    text only decides that a row is not shown; it never trims what is."""
     from agent.context_compressor import is_compaction_summary_message
 
     seen: list[tuple[dict[str, Any], str]] = []
@@ -53,48 +57,69 @@ def _visible(rows: list[dict[str, Any]]) -> list[tuple[dict[str, Any], str]]:
             continue
         if is_compaction_summary_message(row):  # the flag can be lost in round-trips; this reads content too
             continue
-        text = _visible_text(row.get("content")).strip()
-        if text and not (role == "user" and text.startswith(_SCAFFOLD_PREFIX)):
+        text = _visible_text(row.get("content"))
+        if text.strip() and not (role == "user" and text.lstrip().startswith(_SCAFFOLD_PREFIX)):
             seen.append((row, text))
     return seen
 
 
-def _assistant_ids(visible: list[tuple[dict[str, Any], str]], finals: list[tuple[str, str]]) -> dict[int, str]:
-    """Row id -> the ``message.final`` id that delivered it, newest reply to newest event."""
-    unused = list(finals)
-    matched: dict[int, str] = {}
+def _reply_key(text: str) -> str:
+    """What a delivered reply and its persisted row agree on: the same text as the contract carries
+    it, whatever whitespace one of them keeps around it."""
+    return wire.clean_text(text).strip()
+
+
+def _delivered(visible: list[tuple[dict[str, Any], str]],
+               finals: list[tuple[str, str]]) -> dict[int, tuple[str, str]]:
+    """Row id -> ``(message_id, text)`` of the ``message.final`` that delivered it, newest reply to
+    newest event."""
+    unused = [(message_id, text, _reply_key(text)) for message_id, text in finals]
+    matched: dict[int, tuple[str, str]] = {}
     for row, text in reversed(visible):
+        if not unused:
+            break
         if row.get("role") != "assistant":
             continue
-        hit = next((index for index, (_, final_text) in enumerate(unused) if final_text == text), None)
+        key = _reply_key(text)
+        hit = next((index for index, (_, _, final_key) in enumerate(unused) if final_key == key), None)
         if hit is not None:
-            matched[int(row["id"])] = unused.pop(hit)[0]
+            message_id, final_text, _ = unused.pop(hit)
+            matched[int(row["id"])] = (message_id, final_text)
     return matched
 
 
-def _message_id(row: dict[str, Any], matched: dict[int, str]) -> str:
+def _message_id(row: dict[str, Any], delivered: dict[int, tuple[str, str]]) -> str:
     if row.get("role") == "user":
         platform_id = row.get("platform_message_id")
         if wire.is_id(platform_id):
             return platform_id
-    return matched.get(int(row["id"])) or f"h{int(row['id'])}"
+    hit = delivered.get(int(row["id"]))
+    return hit[0] if hit else f"h{int(row['id'])}"
 
 
-def page(rows: list[dict[str, Any]], before: Optional[int], limit: int, *,
+def _text(row: dict[str, Any], text: str, delivered: dict[int, tuple[str, str]]) -> str:
+    hit = delivered.get(int(row["id"])) if row.get("role") == "assistant" else None
+    return hit[1] if hit else wire.clean_text(text)
+
+
+def page(rows: list[dict[str, Any]], before: Optional[str], limit: int, *,
          finals: list[tuple[str, str]], media_for: Callable[[list[str]], dict[str, list[dict[str, Any]]]],
          ) -> tuple[list[dict[str, Any]], Optional[str]]:
-    """``(messages oldest first, cursor of the next older page or None)``. ``before`` is a row id."""
+    """``(messages oldest first, cursor of the next older page or None)``. ``before`` must name a
+    visible row; anything else is ``404 not-found``."""
     visible = _visible(rows)
-    matched = _assistant_ids(visible, finals)  # over the whole conversation: ids stay the same on every page
+    delivered = _delivered(visible, finals)  # over the whole conversation: ids stay the same on every page
     if before is not None:
         # Position, not id order: in-place compaction re-sequences carried rows under fresh ids.
-        index = next((i for i, (row, _) in enumerate(visible) if int(row["id"]) == before), None)
-        visible = visible[:index] if index is not None else [item for item in visible if int(item[0]["id"]) < before]
+        index = next((i for i, (row, _) in enumerate(visible) if str(int(row["id"])) == before), None)
+        if index is None:
+            raise wire.refuse("not-found")
+        visible = visible[:index]
     chunk = visible[-limit:]
-    ids = [_message_id(row, matched) for row, _ in chunk]
+    ids = [_message_id(row, delivered) for row, _ in chunk]
     media = media_for([message_id for (row, _), message_id in zip(chunk, ids) if row.get("role") == "user"])
     messages = [{
-        "message_id": message_id, "role": row["role"], "text": wire.clean_text(text),
+        "message_id": message_id, "role": row["role"], "text": _text(row, text, delivered),
         "at": wire.instant(float(row.get("timestamp") or 0)), "via": PLATFORM,
         "media": media.get(message_id, []) if row["role"] == "user" else [],
     } for (row, text), message_id in zip(chunk, ids)]

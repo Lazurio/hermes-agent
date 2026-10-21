@@ -588,7 +588,7 @@ class LazurioWebAdapter(BasePlatformAdapter):
             raise wire.refuse("conflict")
         await self._retire(clarify_id)
 
-    def _history_page(self, session_key: str, before: Optional[int], limit: int):
+    def _history_page(self, session_key: str, before: Optional[str], limit: int):
         outbox = self.outbox
 
         def media_for(message_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
@@ -599,7 +599,7 @@ class LazurioWebAdapter(BasePlatformAdapter):
         return history.page(self._lineage_rows(session_key), before, limit,
                             finals=outbox.recent_assistant_finals(_FINALS_SCAN), media_for=media_for)
 
-    async def read_history(self, before: Optional[int], limit: int) -> dict[str, Any]:
+    async def read_history(self, before: Optional[str], limit: int) -> dict[str, Any]:
         """Only the newest page carries the snapshot, and its ``event_id`` is read BEFORE the
         transcript: the events after it may repeat a reply the page holds (same ``message_id``, so
         the client keeps one) but never miss one."""
