@@ -67,8 +67,6 @@ STREAM_MAX_SECONDS = 100.0
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
 EVENT_RETENTION_SECONDS = 3 * 24 * 3600
 INBOUND_RETENTION_SECONDS = 7 * 24 * 3600
-# A retried client_id is dispatched again only while its claim is younger than this.
-INBOUND_REDISPATCH_SECONDS = 3600
 MEDIA_RETENTION_SECONDS = 7 * 24 * 3600
 PRUNE_INTERVAL_SECONDS = 3600.0
 CLARIFY_POLL_SECONDS = 0.5
@@ -466,12 +464,11 @@ class LazurioWebAdapter(BasePlatformAdapter):
         return any(row.get("platform_message_id") == message_id for row in self._lineage_rows(session_key))
 
     async def _claim_settled(self, claim: InboundClaim) -> bool:
-        """A repeated ``client_id`` is answered without dispatch when this process already handed
-        the message to the gateway (queued or running) or Hermes persisted it. A claim left behind
-        by a gateway that died before either happened is dispatched again, so a retry recovers the
-        message instead of hitting a dead claim. Claims older than ``INBOUND_REDISPATCH_SECONDS``
-        count as settled."""
-        if claim.message_id in self._dispatched or time.time() - claim.created_at > INBOUND_REDISPATCH_SECONDS:
+        """A repeated ``client_id`` is answered without dispatch only on evidence: this process
+        already handed the message to the gateway (queued or running), or Hermes persisted it. A
+        claim left behind by a gateway that died before either happened is dispatched again,
+        however old, so a retry recovers the message instead of hitting a dead claim."""
+        if claim.message_id in self._dispatched:
             return True
         return await asyncio.to_thread(self._in_transcript, self.owner_session_key(), claim.message_id)
 

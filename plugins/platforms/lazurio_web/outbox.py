@@ -55,7 +55,6 @@ class OutboxEvent:
 @dataclass(frozen=True)
 class InboundClaim:
     message_id: str
-    created_at: float
     created: bool
 
 
@@ -124,16 +123,15 @@ class Outbox:
 
     def claim_inbound(self, client_id: str, message_id: str) -> InboundClaim:
         """The claim stored for ``client_id``; ``created`` when this call stored it."""
-        now = time.time()
         with self._lock:
             cursor = self._conn.execute(
                 "INSERT OR IGNORE INTO inbound (client_id, message_id, created_at) VALUES (?, ?, ?)",
-                (client_id, message_id, now))
+                (client_id, message_id, time.time()))
             if cursor.rowcount:
-                return InboundClaim(message_id, now, True)
+                return InboundClaim(message_id, True)
             row = self._conn.execute(
-                "SELECT message_id, created_at FROM inbound WHERE client_id = ?", (client_id,)).fetchone()
-        return InboundClaim(row[0], float(row[1]), False)
+                "SELECT message_id FROM inbound WHERE client_id = ?", (client_id,)).fetchone()
+        return InboundClaim(row[0], False)
 
     def forget_inbound(self, client_id: str) -> None:
         """Release a claim whose dispatch failed, so the client's retry is dispatched again."""

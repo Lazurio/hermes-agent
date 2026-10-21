@@ -137,9 +137,10 @@ def _transcript_store(adapter, tmp_path, *rows):
 
 @pytest.mark.asyncio
 async def test_a_retry_recovers_a_claim_left_by_a_gateway_that_died(web, tmp_path):
-    """Review finding: the claim used to outlive the in-memory dispatch, so after a crash the retry
-    got the old id and nothing ran. A claim this process never dispatched and Hermes never persisted
-    is dispatched again, under the same id; once dispatched, a retry stays a no-op."""
+    """Review findings: the claim used to outlive the in-memory dispatch, so after a crash the retry
+    got the old id and nothing ran; then a claim older than an hour was taken as settled by age. A
+    claim this process never dispatched and Hermes never persisted is dispatched again, under the
+    same id and however old; once dispatched, a retry stays a no-op."""
     seen = []
 
     async def handler(event):
@@ -148,16 +149,22 @@ async def test_a_retry_recovers_a_claim_left_by_a_gateway_that_died(web, tmp_pat
 
     async with web.running(handler=handler) as rig:
         db = _transcript_store(rig.adapter, tmp_path, ("user", "Uloženo", "m-persisted"))
-        rig.adapter.outbox.claim_inbound("lost-client", "m-lost")  # the previous gateway's claim
-        rig.adapter.outbox.claim_inbound("kept-client", "m-persisted")
+        outbox = rig.adapter.outbox
+        outbox.claim_inbound("lost-client", "m-lost")  # the previous gateway's claims
+        outbox.claim_inbound("aged-client", "m-aged")
+        outbox.claim_inbound("kept-client", "m-persisted")
+        with outbox._lock:  # a gateway that stayed down for a day
+            outbox._conn.execute("UPDATE inbound SET created_at = ? WHERE client_id = 'aged-client'",
+                                 (time.time() - 24 * 3600,))
         for client_id, expected in (("lost-client", "m-lost"), ("lost-client", "m-lost"),
-                                    ("kept-client", "m-persisted")):
+                                    ("aged-client", "m-aged"), ("kept-client", "m-persisted")):
             async with rig.client.post(f"{rig.base}/v1/messages", json=_message(client_id)) as resp:
                 assert resp.status == 202
                 assert (await resp.json())["message_id"] == expected
-        await async_wait_until(lambda: seen and not rig.adapter._active_sessions, what="the turn finished")
+        await async_wait_until(lambda: len(seen) == 2 and not rig.adapter._active_sessions,
+                               what="both recovered turns finished")
     db.close()
-    assert seen == ["m-lost"]
+    assert seen == ["m-lost", "m-aged"]
 
 
 @pytest.mark.asyncio

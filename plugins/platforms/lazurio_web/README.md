@@ -99,14 +99,17 @@ plugin implements. All bodies are JSON, all ids are opaque strings unless noted.
 | `GET /v1/media/<media_id>` | the bytes of a file Buddy sent |
 
 - **`client_id`** (1-128 of `[A-Za-z0-9._:-]`) makes a retry safe. The same `client_id` returns the
-  first `message_id`, and the message is dispatched again only when neither this gateway process
-  handed it on (queued or running) nor Hermes persisted it (its user row carries `message_id`), and
-  the first attempt is less than an hour old. A concurrent retry waits for the first attempt, so
-  `202` always names a message that was handed to the gateway.
-- **`202` means "handed to the gateway"**, held in memory like every Hermes platform's queue. A
-  gateway that dies before the turn persists the message loses it, so after every reconnect the
-  client re-sends, with the same `client_id`, each message it has not yet seen as `turn.started` or
-  in the history. A message that was already handed on or persisted is not run twice.
+  first `message_id`; the message is dispatched again only when neither this gateway process handed
+  it on (queued or running) nor Hermes persisted it in this conversation (its user row carries
+  `message_id`). A concurrent retry waits for the first attempt, so `202` always names a message
+  that was handed to the gateway. Claims are kept 7 days; after that a retry is a new message.
+- **`202` means "handed to the gateway"**, held in memory like every Hermes platform's queue, and
+  `turn.started` only means a turn began. The durable evidence is the history: a message is
+  confirmed once its `message_id` appears in `GET /v1/history`. Until then, after every
+  reconnect, the client re-sends it with the same `client_id`; one already handed on or persisted
+  is not run twice. Two Hermes paths fold a message into another turn without its own row, a photo
+  sent while a photo turn waits and a steered text in `busy_input_mode: steer`: the client may stop
+  re-sending such a message once a later message of the person is confirmed.
 - **`text`** at most 32,000 characters; `text` or an attachment is required.
 - **`attachments`**: at most 8 of `{name, mime, data_base64}`, each at most 10 MiB decoded and 20 MiB
   together. Images reach the turn as photos, everything else as documents.
