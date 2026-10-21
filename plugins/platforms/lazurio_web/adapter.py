@@ -475,6 +475,7 @@ class LazurioWebAdapter(BasePlatformAdapter):
     async def answer_clarify(self, clarify_id: str, body: dict[str, Any]) -> dict[str, Any]:
         from tools.clarify_gateway import resolve_gateway_clarify
 
+        self._require_owner()
         entry = clarify.open_entry(clarify_id)
         if entry is None or entry.session_key != self.owner_session_key():
             if clarify_id in self._clarify_watchers:

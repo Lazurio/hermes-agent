@@ -30,7 +30,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from aiohttp import web
 
@@ -230,6 +230,12 @@ def _stream_cursor(request: web.Request) -> Optional[int]:
 
 # -- handlers ----------------------------------------------------------------------------------
 
+def content_disposition(disposition: str, name: str) -> str:
+    """RFC 6266: an ASCII fallback plus the exact UTF-8 name („Zpráva.pdf“)."""
+    fallback = "".join(ch if 32 <= ord(ch) < 127 and ch not in '"\\' else "_" for ch in name) or "file"
+    return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
 def sse_frame(event: OutboxEvent) -> bytes:
     data = json.dumps(event.data, ensure_ascii=False, separators=(",", ":"))
     return f"id: {event.id}\nevent: {event.type}\ndata: {data}\n\n".encode()
@@ -273,8 +279,7 @@ class Handlers:
         headers = {
             "Content-Type": record.mime, "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "sandbox; default-src 'none'", "Cache-Control": "private, max-age=3600",
-            "Content-Disposition": f"{'inline' if inline else 'attachment'}; "
-                                   f"filename={json.dumps(record.name, ensure_ascii=True)}",
+            "Content-Disposition": content_disposition("inline" if inline else "attachment", record.name),
         }
         return web.FileResponse(record.path, headers=headers)
 

@@ -314,18 +314,19 @@ async def test_files_buddy_sends_are_listed_and_served(web, tmp_path):
     report.write_bytes(b"%PDF-1.4 test")
     async with web.running() as rig:
         start = rig.adapter.outbox.last_id()
-        result = await rig.adapter.send_document("owner", str(report), caption="Zpráva", file_name="report.pdf")
+        result = await rig.adapter.send_document("owner", str(report), caption="Zpráva", file_name="Zpráva.pdf")
         assert result.success
         report.unlink()  # the channel keeps its own copy
         (event,) = await web.read_events(rig.client, rig.base, after=start, until=lambda evs: len(evs) == 1)
         (media,) = event["data"]["media"]
         assert (event["type"], event["data"]["text"]) == ("message.final", "Zpráva")
         assert (media["kind"], media["name"], media["mime"], media["size"]) == (
-            "file", "report.pdf", "application/pdf", 13)
+            "file", "Zpráva.pdf", "application/pdf", 13)
         async with rig.client.get(f"{rig.base}/v1/media/{media['id']}") as resp:
             assert resp.status == 200
             assert await resp.read() == b"%PDF-1.4 test"
-            assert resp.headers["Content-Disposition"].startswith("attachment;")
+            assert resp.headers["Content-Disposition"] == (
+                "attachment; filename=\"Zpr_va.pdf\"; filename*=UTF-8''Zpr%C3%A1va.pdf")
             assert resp.headers["X-Content-Type-Options"] == "nosniff"
         async with rig.client.get(f"{rig.base}/v1/media/unknown") as resp:
             assert resp.status == 404
