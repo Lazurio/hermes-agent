@@ -119,18 +119,15 @@ def _query(request: web.Request, allowed: set[str]) -> dict[str, str]:
     return {name: query[name] for name in query}
 
 
-def _history_query(request: web.Request) -> tuple[Optional[int], int]:
+def _history_query(request: web.Request) -> tuple[Optional[str], int]:
     query = _query(request, {"before", "limit"})
     before, limit = query.get("before"), query.get("limit")
     if before is not None and not wire.CURSOR.fullmatch(before):
         raise wire.refuse("bad-request")
-    if before is not None and not before.isdigit():
-        raise wire.refuse("bad-request")  # a well-formed cursor this adapter never minted
     if limit is not None and not (limit[:1] in "123456789" and limit.isdigit() and len(limit) <= 3
                                   and int(limit) <= wire.HISTORY_LIMIT_MAX):
         raise wire.refuse("bad-request")
-    return (int(before) if before is not None else None,
-            int(limit) if limit is not None else wire.HISTORY_LIMIT_DEFAULT)
+    return before, int(limit) if limit is not None else wire.HISTORY_LIMIT_DEFAULT
 
 
 def _events_cursor(request: web.Request) -> Optional[str]:
@@ -164,7 +161,9 @@ class Handlers:
 
     async def get_history(self, request: web.Request) -> web.Response:
         before, limit = _history_query(request)
-        return json_response(await self.api.read_history(before, limit))
+        if before is not None and not before.isdigit():
+            raise wire.refuse("not-found")  # a well-formed cursor this adapter never minted: no such page
+        return json_response(await self.api.read_history(int(before) if before is not None else None, limit))
 
     async def post_clarify(self, request: web.Request) -> web.Response:
         kind, value = wire.clarify_answer(await _json_body(request, wire.SMALL_BODY_BYTES))

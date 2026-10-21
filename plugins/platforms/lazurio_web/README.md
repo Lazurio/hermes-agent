@@ -131,7 +131,8 @@ the plugin takes the live status instead.)
   holds it, so a reply both on the newest page and among the events after its snapshot stays one
   message; older replies get a stable id from their row (`h<row>`). Every message is `via`
   `lazurio_web` in v1. Only the newest page carries the `snapshot`, whose `event_id` is read before
-  the transcript, so nothing between the page and the stream is lost.
+  the transcript, so nothing between the page and the stream is lost. A well-formed `before` this
+  adapter never minted is `404 not-found`.
 - **Clarify.** Choices are shown as single lines of at most 200 code points, all distinct; answers
   are mapped back to Hermes' own labels, a multi-select answer as Hermes' JSON array. `{text}` is
   „Jiné…“ and `{skip: true}` is „Přeskočit“. An answer to a question no longer open is

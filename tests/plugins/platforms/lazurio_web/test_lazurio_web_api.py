@@ -552,9 +552,11 @@ async def test_history_pages_follow_the_contract(web, tmp_path):
         async with rig.client.get(f"{rig.base}/v1/history") as resp:
             whole = await resp.json()
         for query in ("limit=0", "limit=101", "limit=030", "limit=-1", "before=", "before=a&before=b",
-                      "page=2", "before=c:10"):
+                      "page=2", "before=c%20d"):
             async with rig.client.get(f"{rig.base}/v1/history?{query}") as resp:
                 assert await _error(resp) == (400, _code("bad-request")), query
+        async with rig.client.get(f"{rig.base}/v1/history?before=c%3A10&limit=100") as resp:
+            assert await _error(resp) == (404, _code("not-found"))  # well-formed, but never minted here
     db.close()
     for page in (newest, older, whole):
         assert set(page) == {"messages", "before", "snapshot"}
