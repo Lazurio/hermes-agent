@@ -19,6 +19,9 @@ test and release it, and these changes to Hermes' ACP server (`hermes acp`):
   select; a change from any surface reaches the chat.
 - **Buddy can ask.** A chat whose editor answers ACP form elicitation (Lazurio T3 Code does) gets
   Hermes' `clarify` tool, so Buddy asks its user in the chat's question panel.
+- **Sending while Buddy works.** When the chat stops a running turn to send a new message, the
+  message reaches Hermes with the request it interrupted, as Hermes' own ACP server did, so it
+  corrects that request instead of replacing it.
 
 Every change Lazurio makes to Hermes is listed in the runbook's overlay table, with why Lazurio
 needs it and what upstream has to ship before it goes away.

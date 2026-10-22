@@ -77,6 +77,9 @@ jobs:
             # advertises it.
             # acp: session/resume attaches without replaying history: _resume replays only for
             # session/load.
+            # acp: after the editor's Stop, its next prompt carries the interrupted request: the
+            # viewer mixes in acp_adapter/lazurio_stop_and_send.py, which prompt and _cancel_admission
+            # call.
             acp_adapter/gateway_server.py
             # acp: clarify for an ACP editor that answers form elicitation. The owner advertises the
             # key (session_controls.py describe), accepts it (session_local_editor.py), adds the

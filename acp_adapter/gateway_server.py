@@ -18,6 +18,7 @@ from hermes_cli.gateway_client import GatewayClientError, connect_gateway
 from hermes_constants import get_hermes_home
 from acp_adapter.gateway_reply import GatewayReplyMixin, _text
 from acp_adapter.lazurio_config_options import LazurioConfigOptionsMixin
+from acp_adapter.lazurio_stop_and_send import LazurioStopAndSendMixin
 from acp_adapter.session import _translate_acp_cwd, _normalize_cwd_for_compare
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ def _tools_changed_notice(payload):
     return f"Editor MCP tools changed (servers: {servers}); the new tool list applies from the next turn.\n"
 
 
-class GatewayACPAgent(LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
+class GatewayACPAgent(LazurioStopAndSendMixin, LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
     def __init__(self):
         self._conn = None
         self._gateway = None
@@ -422,6 +423,7 @@ class GatewayACPAgent(LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
         return ResumeSessionResponse(**await self._resume(cwd, session_id, mcp_servers, replay=False))
 
     async def _cancel_admission(self, session_id, admission_id):
+        self._lazurio_stopping(session_id, admission_id)  # Lazurio: this editor's Stop (stop and send)
         client = await self._client()
         # Cancel our own admission; another surface's running turn is not ours to
         # interrupt. Only when our admission is the one executing do we interrupt.
@@ -655,6 +657,8 @@ class GatewayACPAgent(LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
         answered, text = await self._run_slash(held_id, session_id, text) if not attachments else (False, text)
         if answered:
             return PromptResponse(stop_reason='end_turn')
+        # Lazurio: after this editor's Stop, the next prompt carries the interrupted request (main's rule).
+        text, staged = self._lazurio_carry_interrupted(session_id, staged, text)
         # ... and every prepared control's (a slash keeps its own key: apply retires the rest).
         self._mutations.retire(session_id)
         submit = {'text': text}
@@ -681,6 +685,7 @@ class GatewayACPAgent(LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
         admission_id = await self._admission_from_receipt(client, held_id, session_id, receipt)
         if admission_id is None:
             return PromptResponse(stop_reason='end_turn')
+        self._lazurio_submitted(session_id, admission_id, text, attachments)
         self._inflight[(session_id, admission_id)] = None
         try:
             await self._after_ack(session_id, admission_id, link, resumes)
