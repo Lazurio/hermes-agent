@@ -113,7 +113,9 @@ def _print_version() -> None:
 def _run_check() -> None:
     import acp
     from acp_adapter.server import HermesACPAgent
+    from acp_adapter.lazurio_check import check_mcp_sdk
 
+    check_mcp_sdk()  # Lazurio: an editor's MCP servers need the MCP SDK
     print("Hermes ACP check OK")
 
 
