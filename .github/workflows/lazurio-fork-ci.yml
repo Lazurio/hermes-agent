@@ -1,0 +1,166 @@
+name: Lazurio Fork CI
+
+# Read-only CI for the Lazurio overlay on upstream Hermes Agent: on pull requests, on main, by hand
+# and inside every release run (workflow_call), always on one exact source commit. Upstream's own
+# workflows cut and publish upstream releases and need upstream runners and secrets; they stay
+# disabled in this repository's Actions settings. Runbook: docs/operations/lazurio-fork-release.md.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit to test
+        required: true
+        type: string
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: none
+
+concurrency:
+  group: lazurio-fork-ci-${{ github.event_name }}-${{ inputs.source_sha || github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UPSTREAM_TAG: v0.22.4
+  UPSTREAM_SHA: 4d04303818b61bf3aa09278af48356315515965b
+  UPSTREAM_REPOSITORY: https://github.com/NousResearch/hermes-agent.git
+  SOURCE_REF: ${{ inputs.source_sha || github.event.pull_request.head.sha || github.sha }}
+  SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+
+jobs:
+  guard:
+    name: Overlay guard and contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Fetch exact source and upstream base without credentials
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]
+          git init -q .
+          git remote add source "https://github.com/${SOURCE_REPOSITORY}.git"
+          git fetch --quiet --filter=blob:none --no-tags source "$SOURCE_REF"
+          git checkout --quiet --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$SOURCE_REF"
+
+          # Upstream tags are annotated: the base is the tag's peeled commit, never the tag object.
+          git remote add upstream "$UPSTREAM_REPOSITORY"
+          git fetch --quiet --filter=blob:none --no-tags upstream \
+            "refs/tags/$UPSTREAM_TAG:refs/tags/upstream-$UPSTREAM_TAG"
+          test "$(git rev-parse "refs/tags/upstream-$UPSTREAM_TAG^{commit}")" = "$UPSTREAM_SHA"
+          git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD
+          test "$(git rev-list --merges "$UPSTREAM_SHA..HEAD" --count)" = 0
+
+      - name: Overlay changes only allowed upstream files
+        run: |
+          set -euo pipefail
+          # Upstream files whose content the overlay changes, grouped by the overlay row that owns
+          # them. Each entry is a reviewed decision with its reason; new Lazurio files need no entry.
+          # Changing the content of any other upstream file fails. The distribution row adds only
+          # Lazurio files.
+          allowed_upstream_changes=(
+          )
+          # Deleting an upstream file, renaming one (with rename detection off, a rename is a
+          # deletion plus a new file) or changing its type always fails, allowlisted or not.
+          removed="$(git diff --name-status --no-renames --diff-filter=DT "$UPSTREAM_SHA..HEAD")"
+          if [ -n "$removed" ]; then
+            echo "The overlay deleted, renamed or retyped upstream files:" >&2
+            echo "$removed" >&2
+            exit 1
+          fi
+          unexpected="$(git diff --name-only --no-renames --diff-filter=M "$UPSTREAM_SHA..HEAD" |
+            grep -vxF -f <(printf '%s\n' ${allowed_upstream_changes[@]+"${allowed_upstream_changes[@]}"}) || true)"
+          if [ -n "$unexpected" ]; then
+            echo "The overlay changed upstream files outside allowed_upstream_changes:" >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Upstream workflows stay disabled
+        if: github.repository == 'Lazurio/hermes-agent'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          active="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows?per_page=100" \
+            --jq '.workflows[] | select(.state == "active") | select(.path | test("^\\.github/workflows/lazurio-") | not) | .path')"
+          if [ -n "$active" ]; then
+            echo "Upstream workflows are enabled in this fork; disable them (runbook: Automation boundary):" >&2
+            echo "$active" >&2
+            exit 1
+          fi
+
+      - name: Validate the Lazurio release contract
+        run: python3 scripts/lazurio_fork_contract_test.py -v
+
+  # Upstream's locked toolchain and upstream's runner (one process per test file) over a fixed gate
+  # plus every test file the overlay adds or changes. The gate holds upstream's tests of the seams the
+  # overlay touches; a gate path that disappears fails the step, so a rebuild reviews the gate.
+  tests:
+    name: Upstream and overlay tests
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Fetch exact source and upstream base without credentials
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add source "https://github.com/${SOURCE_REPOSITORY}.git"
+          git fetch --quiet --filter=blob:none --no-tags source "$SOURCE_REF"
+          git checkout --quiet --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$SOURCE_REF"
+          git remote add upstream "$UPSTREAM_REPOSITORY"
+          git fetch --quiet --filter=blob:none --no-tags upstream \
+            "refs/tags/$UPSTREAM_TAG:refs/tags/upstream-$UPSTREAM_TAG"
+          test "$(git rev-parse "refs/tags/upstream-$UPSTREAM_TAG^{commit}")" = "$UPSTREAM_SHA"
+
+      - name: Set up upstream's locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '["acp"]'
+          test-environment: 'true'
+
+      - name: Test the gate and what the overlay adds or changes
+        env:
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
+        run: |
+          set -euo pipefail
+          # The fixed gate: upstream's ACP adapter tests (the seams of the ACP overlay rows, with
+          # upstream's real gateway and ACP stdio tests) and upstream's check of every workflow's job
+          # graph and triggers, which reads the lazurio-* workflows too.
+          gate=(
+            tests/acp_adapter
+            tests/ci/test_workflow_job_graph.py
+          )
+          paths=()
+          for path in "${gate[@]}"; do
+            if [ -z "$(git ls-files -- "$path" | grep -E '(^|/)test_[^/]*\.py$' || true)" ]; then
+              echo "The test gate's $path is gone or holds no tests." >&2
+              exit 1
+            fi
+            paths+=("$path")
+          done
+          # Test files the overlay adds or changes, outside the gate's directories.
+          while IFS= read -r file; do
+            covered=false
+            for path in "${gate[@]}"; do
+              case "$file" in "$path" | "$path"/*) covered=true ;; esac
+            done
+            if [ "$covered" = false ]; then paths+=("$file"); fi
+          done < <(git diff --name-only --diff-filter=d "$UPSTREAM_SHA..HEAD" -- 'tests/*.py' |
+            grep -E '(^|/)test_[^/]*\.py$' || true)
+          printf 'Testing:\n'
+          printf '  %s\n' "${paths[@]}"
+          scripts/run_tests.sh "${paths[@]}"

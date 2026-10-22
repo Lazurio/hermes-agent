@@ -1,0 +1,79 @@
+name: Lazurio upstream watch
+
+# Once a day: when upstream Hermes Agent has a stable release newer than the base of main
+# (UPSTREAM_TAG in lazurio-fork-ci.yml), opens the rebuild's tracking issue from the runbook's
+# template, or comments once per newer tag on the open one. It reads upstream's public releases and
+# this repository's files and writes only issues here, with this repository's token. Following
+# upstream, the swap of main and the releases stay with people.
+# Runbook: docs/operations/lazurio-fork-release.md, "Following upstream".
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    name: Upstream stable release
+    if: github.repository == 'Lazurio/hermes-agent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Open or update the rebuild's tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          UPSTREAM: NousResearch/hermes-agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw() { gh api "repos/$REPO/contents/$1?ref=main" -H "Accept: application/vnd.github.raw"; }
+          # Upstream's own stable shape (hermes_cli/update_channel.py STABLE_TAG_RE): vX.Y.Z with a
+          # major of at most three digits, so the old calendar tags (v2026.9.24) never count.
+          stable='^v(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+          base="$(raw .github/workflows/lazurio-fork-ci.yml | sed -n 's/^  UPSTREAM_TAG: //p')"
+          latest="$(gh release list --repo "$UPSTREAM" --exclude-drafts --exclude-pre-releases \
+            --limit 30 --json tagName --jq '.[].tagName' | grep -E "$stable" | sort -V | tail -n 1 || true)"
+          if [[ ! "$base" =~ $stable || ! "$latest" =~ $stable ]]; then
+            echo "Unexpected tags: main's UPSTREAM_TAG '$base', upstream's newest stable '$latest'." >&2
+            exit 1
+          fi
+          if [[ "$(printf '%s\n' "$base" "$latest" | sort -V | tail -n 1)" == "$base" ]]; then
+            echo "main is built on $base; upstream's newest stable release is $latest."
+            exit 0
+          fi
+
+          # The tag's commit: an annotated tag advertises it as <tag>^{} beside the tag object.
+          refs="$(git ls-remote "https://github.com/$UPSTREAM.git" "refs/tags/$latest" "refs/tags/$latest^{}")"
+          sha="$(awk -v ref="refs/tags/$latest^{}" '$2 == ref { print $1 }' <<<"$refs")"
+          if [[ -z "$sha" ]]; then
+            sha="$(awk -v ref="refs/tags/$latest" '$2 == ref { print $1 }' <<<"$refs")"
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Upstream's tag $latest does not resolve to exactly one commit ('$sha')." >&2
+            exit 1
+          fi
+          marker="<!-- lazurio-upstream-watch $latest -->"
+          note="$marker
+          Upstream Hermes Agent published the stable release [$latest](https://github.com/$UPSTREAM/releases/tag/$latest) (commit \`$sha\`). \`main\` is built on $base. Steps: [Following upstream](https://github.com/$REPO/blob/main/docs/operations/lazurio-fork-release.md#following-upstream)."
+
+          # One tracking issue at a time: a newer stable during a rebuild is noted in the open one.
+          issue="$(gh issue list --repo "$REPO" --state open --limit 500 --json number,title \
+            --jq 'map(select(.title | startswith("Rebuild on upstream Hermes Agent ")))[0].number // ""')"
+          if [[ -z "$issue" ]]; then
+            template="$(raw docs/operations/lazurio-fork-release.md |
+              sed -n '/^<!-- rebuild-issue:start -->$/,/^<!-- rebuild-issue:end -->$/p')"
+            test -n "$template"
+            gh issue create --repo "$REPO" --title "Rebuild on upstream Hermes Agent $latest" \
+              --body "$note"$'\n\n'"$template"
+          elif [[ "$(gh issue view "$issue" --repo "$REPO" --json body,comments \
+            --jq '[.body, .comments[].body] | join("\n")')" != *"$marker"* ]]; then
+            gh issue comment "$issue" --repo "$REPO" --body "$note"
+          else
+            echo "Issue #$issue already notes $latest."
+          fi

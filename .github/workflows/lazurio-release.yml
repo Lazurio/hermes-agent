@@ -1,0 +1,274 @@
+name: Lazurio Hermes Agent Release
+
+# Manually dispatched from main by the release owner. Verifies the exact source and version, runs
+# Lazurio Fork CI on that source, then waits for approval in the lazurio-hermes-agent-release
+# environment before it tags the source with the release App and publishes the GitHub Release that
+# Lazurio Machines pin. A release is a protected tag and its notes, no packages: Lazurio installs
+# Hermes with the official installer from this source at the tagged commit (Lazurio decision 0210
+# point 2). Nothing is ever overwritten. Runbook: docs/operations/lazurio-fork-release.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version X.Y.Z-lazurio.N (tag vX.Y.Z-lazurio.N)
+        required: true
+        type: string
+      source_sha:
+        description: Exact 40-character commit at the tip of main
+        required: true
+        type: string
+      upstream_tag:
+        description: Exact upstream stable tag the source is based on (vX.Y.Z)
+        required: true
+        type: string
+      upstream_sha:
+        description: Exact 40-character commit of that tag (peeled)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: none
+
+concurrency:
+  group: lazurio-hermes-agent-release
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version }}
+  RELEASE_TAG: v${{ inputs.version }}
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+  UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+  UPSTREAM_REPOSITORY: https://github.com/NousResearch/hermes-agent.git
+
+jobs:
+  verify:
+    name: Verify source and version
+    if: github.repository == 'Lazurio/hermes-agent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Fetch and verify the exact release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-lazurio\.[1-9][0-9]*$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$UPSTREAM_TAG" =~ ^v(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$VERSION" == "${UPSTREAM_TAG#v}-lazurio."* ]]
+          test "$GITHUB_REF" = "refs/heads/main"
+
+          git init -q .
+          git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git fetch --quiet --filter=blob:none --no-tags origin "refs/heads/main:refs/remotes/origin/main"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
+          git checkout --quiet --detach "$SOURCE_SHA"
+
+          git remote add upstream "$UPSTREAM_REPOSITORY"
+          git fetch --quiet --filter=blob:none --no-tags upstream \
+            "refs/tags/$UPSTREAM_TAG:refs/tags/upstream-$UPSTREAM_TAG"
+          test "$(git rev-parse "refs/tags/upstream-$UPSTREAM_TAG^{commit}")" = "$UPSTREAM_SHA"
+          test "$(git merge-base "$UPSTREAM_SHA" "$SOURCE_SHA")" = "$UPSTREAM_SHA"
+          test "$(git rev-list --merges "$UPSTREAM_SHA..$SOURCE_SHA" --count)" = 0
+          # The base must be the one the source's own CI pins: an older stable tag is an ancestor
+          # too, and a release named after it would carry newer code under an older version.
+          test "$(sed -n 's/^  UPSTREAM_TAG: //p' .github/workflows/lazurio-fork-ci.yml)" = "$UPSTREAM_TAG"
+          test "$(sed -n 's/^  UPSTREAM_SHA: //p' .github/workflows/lazurio-fork-ci.yml)" = "$UPSTREAM_SHA"
+
+      # Upstream's workflows publish on v* tags and on pushes to main. In this fork they must stay
+      # disabled, or the tags this release creates would set them off.
+      - name: Refuse while an upstream workflow is enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          active="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows?per_page=100" \
+            --jq '.workflows[] | select(.state == "active") | select(.path | test("^\\.github/workflows/lazurio-") | not) | .path')"
+          if [[ -n "$active" ]]; then
+            echo "Upstream workflows are enabled in this fork; disable them first (runbook: Automation boundary):" >&2
+            echo "$active" >&2
+            exit 1
+          fi
+
+      # Machines move a pin forward only, so a release must be the highest version on the channel.
+      - name: Refuse an existing or non-increasing version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$(git ls-remote origin "refs/tags/$RELEASE_TAG")" ]]; then
+            echo "Tag $RELEASE_TAG already exists." >&2
+            exit 1
+          fi
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          python3 - "$RUNNER_TEMP/releases.json" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          channel = re.compile(r"^v(\d+)\.(\d+)\.(\d+)-lazurio\.(\d+)$")
+          version = os.environ["VERSION"]
+          wanted = tuple(int(part) for part in channel.match(f"v{version}").groups())
+          with open(sys.argv[1], encoding="utf-8") as pages:
+              releases = [release for page in json.load(pages) for release in page]
+          for release in releases:
+              if release["tag_name"] == f"v{version}":
+                  sys.exit(f"A GitHub Release for v{version} already exists.")
+              published = channel.match(release["tag_name"])
+              if release["draft"] or published is None:
+                  continue
+              if wanted <= tuple(int(part) for part in published.groups()):
+                  sys.exit(f"{version} is not newer than the published {release['tag_name']}.")
+          print(f"{version} is the highest version on the channel.")
+          PY
+
+  ci:
+    name: Fork CI on the exact source
+    needs: verify
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/lazurio-fork-ci.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+
+  publish:
+    name: Publish release
+    needs: [verify, ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: lazurio-hermes-agent-release
+    permissions:
+      actions: read
+      contents: write
+    env:
+      RELEASE_CONTROL: ${{ vars.LAZURIO_HERMES_AGENT_RELEASE_CONTROL }}
+    steps:
+      # Runs after approval and before any write. main may have moved while the run waited; then
+      # this release is stale and stops here.
+      - name: Recheck the release source after approval
+        shell: bash
+        env:
+          APP_ID_PRESENT: ${{ vars.LAZURIO_RELEASE_APP_ID != '' }}
+          APP_KEY_PRESENT: ${{ secrets.LAZURIO_RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_CONTROL" = "reviewed-v1"
+          if [[ "$APP_ID_PRESENT" != "true" || "$APP_KEY_PRESENT" != "true" ]]; then
+            echo "Release App variable LAZURIO_RELEASE_APP_ID or secret LAZURIO_RELEASE_APP_PRIVATE_KEY is missing; nothing was published." >&2
+            exit 1
+          fi
+
+          git init -q .
+          git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git fetch --quiet --filter=blob:none --no-tags origin "refs/heads/main:refs/remotes/origin/main"
+          if [[ "$(git rev-parse refs/remotes/origin/main)" != "$SOURCE_SHA" ]]; then
+            echo "main moved away from $SOURCE_SHA since dispatch; nothing was published." >&2
+            exit 1
+          fi
+          git checkout --quiet --detach "$SOURCE_SHA"
+          git remote add upstream "$UPSTREAM_REPOSITORY"
+          git fetch --quiet --filter=blob:none --no-tags upstream \
+            "refs/tags/$UPSTREAM_TAG:refs/tags/upstream-$UPSTREAM_TAG"
+          test "$(git rev-parse "refs/tags/upstream-$UPSTREAM_TAG^{commit}")" = "$UPSTREAM_SHA"
+          # Upstream's annotated tag object: the fork carries an exact copy, which hermes --version reads.
+          tag_object="$(git ls-remote "$UPSTREAM_REPOSITORY" "refs/tags/$UPSTREAM_TAG" | cut -f1)"
+          [[ "$tag_object" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse "refs/tags/upstream-$UPSTREAM_TAG")" = "$tag_object"
+          echo "UPSTREAM_TAG_OBJECT=$tag_object" >> "$GITHUB_ENV"
+
+      - name: Assemble the release notes
+        env:
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "Hermes Agent $UPSTREAM_TAG from [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent/releases/tag/$UPSTREAM_TAG) with the Lazurio overlay, for Lazurio's Osobní Prostředí."
+            echo
+            echo "- Source: \`$SOURCE_SHA\`"
+            echo "- Upstream base: \`$UPSTREAM_TAG\` at \`$UPSTREAM_SHA\`"
+            echo "- Release run, with Lazurio Fork CI on this source: $RUN_URL"
+            echo
+            echo "Install with the official installer and this exact source (Lazurio Machines pin it):"
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://hermes-agent.nousresearch.com/install.sh |"
+            echo "  HERMES_REPO_URL=https://github.com/$GITHUB_REPOSITORY.git bash -s -- --commit $SOURCE_SHA"
+            echo '```'
+            echo
+            echo "## Lazurio overlay"
+            echo
+            git log --no-merges --reverse --pretty='format:- %s (%h)' "$UPSTREAM_SHA..$SOURCE_SHA"
+            echo
+          } > "$RUNNER_TEMP/RELEASE_NOTES.md"
+          cat "$RUNNER_TEMP/RELEASE_NOTES.md"
+
+      # Channel tags can only be created by the Lazurio Hermes Agent Release App, whose private key
+      # is a secret of this environment, so only an approved run can tag. The token is scoped to
+      # this repository.
+      - id: release_app
+        name: Mint the release App token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.LAZURIO_RELEASE_APP_ID }}
+          private-key: ${{ secrets.LAZURIO_RELEASE_APP_PRIVATE_KEY }}
+          owner: Lazurio
+          repositories: hermes-agent
+          permission-contents: write
+
+      # The API refuses an existing ref, so a tag that appeared since verification stops the release.
+      - name: Tag the exact source with the release App
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          WORKFLOWS_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(git ls-remote origin refs/heads/main | cut -f1)" != "$SOURCE_SHA" ]]; then
+            echo "main moved away from $SOURCE_SHA; the release is not tagged." >&2
+            exit 1
+          fi
+          # The approval can take hours: recheck right before the tag writes, which are what would
+          # start a tag-triggered upstream workflow, that none became enabled.
+          active="$(GH_TOKEN="$WORKFLOWS_TOKEN" gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows?per_page=100" \
+            --jq '.workflows[] | select(.state == "active") | select(.path | test("^\\.github/workflows/lazurio-") | not) | .path')"
+          if [[ -n "$active" ]]; then
+            echo "Upstream workflows became enabled since verification; the release is not tagged:" >&2
+            echo "$active" >&2
+            exit 1
+          fi
+          present="$(git ls-remote origin "refs/tags/$UPSTREAM_TAG" | cut -f1)"
+          if [[ -z "$present" ]]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$UPSTREAM_TAG" -f sha="$UPSTREAM_TAG_OBJECT" > /dev/null
+          elif [[ "$present" != "$UPSTREAM_TAG_OBJECT" ]]; then
+            echo "The fork's $UPSTREAM_TAG is $present, not upstream's tag object $UPSTREAM_TAG_OBJECT; the release is not tagged." >&2
+            exit 1
+          fi
+          test "$(git ls-remote origin "refs/tags/$UPSTREAM_TAG" | cut -f1)" = "$UPSTREAM_TAG_OBJECT"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" -f sha="$SOURCE_SHA" > /dev/null
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)" = "$SOURCE_SHA"
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Lazurio Hermes Agent $RELEASE_TAG" \
+            --notes-file "$RUNNER_TEMP/RELEASE_NOTES.md" \
+            --latest
