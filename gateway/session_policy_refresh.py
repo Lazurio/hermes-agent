@@ -64,7 +64,9 @@ def _settings(policy, config, live, picked):
     if 'toolsets' not in request and policy.editor_mcp_json is None:
         keys.append('disabled_toolsets')
         _follow(config, live, 'platform_toolsets')
-        toolsets = tuple(sorted(_resolve_toolsets({}, live, policy.source, policy.safe_mode, policy.coding_posture)))
+        from gateway.lazurio_editor_clarify import editor_params  # Lazurio: an editor's clarify stays
+        toolsets = tuple(sorted(_resolve_toolsets(editor_params(request), live, policy.source, policy.safe_mode,
+                                                  policy.coding_posture)))
     for key in keys:
         _follow(agent, live_agent, key)
     if agent or 'agent' in config:

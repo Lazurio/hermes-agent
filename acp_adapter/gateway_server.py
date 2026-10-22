@@ -280,10 +280,15 @@ class GatewayACPAgent(LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
         flags = env_launch_flags()
         if flags.get("safe_mode") or flags.get("ignore_user_config"):
             flags.update(_bypass_route())
+        editor = {"mcp_servers": [s.model_dump(by_alias=True) for s in mcp_servers or []],
+                  "edit_approval_policy": "ask"}
+        # Lazurio: an editor that answers form elicitation asks for clarify (gateway/lazurio_editor_clarify.py),
+        # from an owner that knows the key.
+        from gateway.lazurio_editor_clarify import CAPABILITY as LAZURIO_FORM_CLARIFY, EDITOR_KEY
+        if self._form_elicitation and LAZURIO_FORM_CLARIFY in descriptor.get("capabilities", []):
+            editor[EDITOR_KEY] = True
         snapshot = await client.rpc("session.create", request_id=uuid.uuid4().hex,
-            source="acp", cwd=_translate_acp_cwd(cwd),
-            editor={"mcp_servers": [s.model_dump(by_alias=True) for s in mcp_servers or []],
-                    "edit_approval_policy": "ask"}, **flags)
+            source="acp", cwd=_translate_acp_cwd(cwd), editor=editor, **flags)
         session_id = snapshot["session_id"]
         await self._adopt(session_id, snapshot)
         if mcp_servers:

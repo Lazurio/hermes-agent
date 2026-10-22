@@ -72,7 +72,19 @@ jobs:
             # mixes in acp_adapter/lazurio_config_options.py: its session replies carry the options,
             # set_config_option runs them and answers with the options last shown, and its snapshot
             # adoption, session.info projection and post-attach notices refresh them from the owner.
+            # acp: clarify for an ACP editor that answers form elicitation (listed below too): the
+            # viewer's session/new asks for it with editor.lazurio_form_elicitation when the owner
+            # advertises it.
             acp_adapter/gateway_server.py
+            # acp: clarify for an ACP editor that answers form elicitation. The owner advertises the
+            # key (session_controls.py describe), accepts it (session_local_editor.py), adds the
+            # clarify toolset at creation and keeps it where a session's toolsets are re-derived
+            # (session_policy.py current_toolsets, session_policy_refresh.py resume refresh), all
+            # through gateway/lazurio_editor_clarify.py.
+            gateway/session_controls.py
+            gateway/session_local_editor.py
+            gateway/session_policy.py
+            gateway/session_policy_refresh.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
           # deletion plus a new file) or changing its type always fails, allowlisted or not.
@@ -143,11 +155,21 @@ jobs:
         run: |
           set -euo pipefail
           # The fixed gate: upstream's ACP adapter tests (the seams of the ACP overlay rows, with
-          # upstream's real gateway and ACP stdio tests) and upstream's check of every workflow's job
-          # graph and triggers, which reads the lazurio-* workflows too.
+          # upstream's real gateway and ACP stdio tests), upstream's check of every workflow's job
+          # graph and triggers, which reads the lazurio-* workflows too, and upstream's tests of the
+          # session policy seams the clarify row touches (creation, editor policy, follow-profile,
+          # resume refresh, the runtime descriptor).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
+            tests/gateway/test_follow_profile_followups.py
+            tests/gateway/test_runtime_describe_skin.py
+            tests/gateway/test_session_edit_policy.py
+            tests/gateway/test_session_follow_profile_config.py
+            tests/gateway/test_session_policy.py
+            tests/gateway/test_session_policy_coding_posture.py
+            tests/gateway/test_session_policy_refusal_fields.py
+            tests/gateway/test_session_resume_config_refresh.py
           )
           paths=()
           for path in "${gate[@]}"; do

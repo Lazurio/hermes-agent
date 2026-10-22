@@ -20,10 +20,12 @@ def validate_editor(source, editor):
     if not isinstance(editor, dict):
         raise RuntimeStoreError('invalid_params', field='editor',
                                 detail=f'must be a mapping, got {type(editor).__name__}')
-    unknown = sorted(set(editor) - {'mcp_servers', 'edit_approval_policy'})
+    from gateway.lazurio_editor_clarify import EDITOR_KEY as LAZURIO_FORM_ELICITATION, validate as lazurio_validate
+    unknown = sorted(set(editor) - {'mcp_servers', 'edit_approval_policy', LAZURIO_FORM_ELICITATION})
     if unknown:
         raise RuntimeStoreError('invalid_params', field=f'editor.{unknown[0]}',
                                 detail='unknown editor key')
+    lazurio_validate(editor)
     if editor.get('edit_approval_policy', 'ask') != 'ask':
         raise RuntimeStoreError('invalid_params', field='editor.edit_approval_policy',
                                 detail="must be 'ask': every edit is approved one at a time")

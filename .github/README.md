@@ -17,6 +17,8 @@ test and release it, and these changes to Hermes' ACP server (`hermes acp`):
 - **Model and reasoning effort in the chat.** Sessions advertise the model and the reasoning effort
   as ACP session config options, so Lazurio T3 Code shows a model picker and a reasoning effort
   select; a change from any surface reaches the chat.
+- **Buddy can ask.** A chat whose editor answers ACP form elicitation (Lazurio T3 Code does) gets
+  Hermes' `clarify` tool, so Buddy asks its user in the chat's question panel.
 
 Every change Lazurio makes to Hermes is listed in the runbook's overlay table, with why Lazurio
 needs it and what upstream has to ship before it goes away.

@@ -250,7 +250,9 @@ class LocalSessionPolicy:
             return self.toolsets
         # The workspace decision is the creation-time one: a project file the agent writes mid-session must
         # not switch this conversation's toolsets (prompt cache). Only a profile change (``focus`` off) does.
-        return tuple(sorted(_resolve_toolsets({}, config, self.source, self.safe_mode, self.coding_posture)))
+        from gateway.lazurio_editor_clarify import editor_params
+        return tuple(sorted(_resolve_toolsets(editor_params(json.loads(self.request_json)), config, self.source,
+                                              self.safe_mode, self.coding_posture)))
 
     def current_reasoning_config(self, runner, session_key=None):
         """The next turn's reasoning: a typed session /reasoning (the messaging handler's override), else
@@ -650,6 +652,9 @@ def _resolve_toolsets(params, config, source, safe_mode, coding_posture=False, b
         from agent.coding_context import focus_toolsets
         posture = focus_toolsets(config)
     enabled = set(posture) if posture is not None else _get_platform_tools(config, 'acp' if source == 'acp' else 'cli')
+    # Lazurio: an ACP editor that answers form elicitation gets clarify (gateway/lazurio_editor_clarify.py).
+    from gateway.lazurio_editor_clarify import clarify_toolsets
+    enabled |= clarify_toolsets(params, config, source)
     if explicit is not None:
         from toolsets import resolve_toolset
         requested = {t for name in explicit for t in resolve_toolset(name)}
