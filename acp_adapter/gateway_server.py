@@ -17,6 +17,7 @@ from acp.schema import (
 from hermes_cli.gateway_client import GatewayClientError, connect_gateway
 from hermes_constants import get_hermes_home
 from acp_adapter.gateway_reply import GatewayReplyMixin, _text
+from acp_adapter.lazurio_config_options import LazurioConfigOptionsMixin
 from acp_adapter.session import _translate_acp_cwd, _normalize_cwd_for_compare
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def _tools_changed_notice(payload):
     return f"Editor MCP tools changed (servers: {servers}); the new tool list applies from the next turn.\n"
 
 
-class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
+class GatewayACPAgent(LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
     def __init__(self):
         self._conn = None
         self._gateway = None
@@ -212,6 +213,7 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
                 self._adopted[session_id] = resumes
             self._changed.notify_all()
         await self._project_mode(session_id, self._editor_id(session_id), snapshot.get("info") or {})
+        await self._lazurio_project_config(session_id, self._editor_id(session_id), snapshot.get("info") or {})
 
     async def _request_live_reasoning(self, client, session_id):
         """Ask the owner to stream this session's reasoning (``show_reasoning``), as the CLI does.
@@ -311,7 +313,8 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
         # ``_adopt`` seeded the mode from the snapshot: a change the pump projected since is what the reply shows.
         modes = session_modes({"edit_approval_policy": MODE_TO_EDIT_APPROVAL_POLICY[self._modes.setdefault(
             session_id, session_modes(info).current_mode_id)]})
-        return {"models": models, "modes": modes, "field_meta": meta}
+        return {"models": models, "modes": modes, "field_meta": meta,
+                **self._lazurio_config_fields(session_id, info, models)}
 
     async def _after_attach(self, session_id, editor_id):
         from acp_adapter.gateway_session_meta import available_commands_update
@@ -323,6 +326,7 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
         except Exception:
             # Boundary: a detached editor or a refused read is not the attach's failure.
             logger.debug("ACP post-attach notices for %s not delivered", session_id, exc_info=True)
+        await self._lazurio_reconcile(session_id)
 
     async def _attach_info(self, client, session_id):
         """``session.info`` for a session to attach. A thread main's in-process server wrote has no
@@ -573,15 +577,21 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
 
     async def set_config_option(self, config_id, session_id, value=None, **kwargs):
         """Accepted so editors do not fail on their own config writes, as main did; only the edit
-        approval policy has a meaning here, and it is the same owner setting the modes select."""
+        approval policy has a meaning here, and it is the same owner setting the modes select.
+        Lazurio: ``model`` and ``thought_level`` are advertised options (``lazurio_config_options``),
+        and every answer carries the options the editor was last shown, which an editor adopts."""
         from acp.schema import SetSessionConfigOptionResponse
+        from acp_adapter.lazurio_config_options import MODEL, THOUGHT_LEVEL
         from acp_adapter.modes import EDIT_APPROVAL_POLICY_CONFIG_ID, EDIT_APPROVAL_POLICY_TO_MODE
         session_id = self._held_session(session_id)
+        if config_id in {MODEL, THOUGHT_LEVEL}:
+            return SetSessionConfigOptionResponse(
+                config_options=await self._lazurio_set_config_option(session_id, config_id, value))
         if config_id == EDIT_APPROVAL_POLICY_CONFIG_ID:
             if value not in EDIT_APPROVAL_POLICY_TO_MODE:
                 raise GatewayClientError("invalid_params")
             await self._set_edit_policy(session_id, value)
-        return SetSessionConfigOptionResponse(config_options=[])
+        return SetSessionConfigOptionResponse(config_options=self._lazurio_shown_options(session_id))
 
     async def _set_edit_policy(self, session_id, policy):
         """The owner's ``edit_policy`` mutation (revision-fenced, idle sessions only, like a model pick);
@@ -1047,6 +1057,7 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
                     self._changed.notify_all()
         await self._project_title(sid, editor_id, payload.get("title"))
         await self._project_mode(sid, editor_id, payload)
+        await self._lazurio_project_config(sid, editor_id, payload)
 
     async def _project_mode(self, sid, editor_id, payload):
         """Another surface's ``edit_policy`` change (its ``session.info``) as ``current_mode_update``."""

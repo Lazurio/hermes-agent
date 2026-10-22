@@ -68,6 +68,11 @@ jobs:
           # Changing the content of any other upstream file fails. The distribution row adds only
           # Lazurio files.
           allowed_upstream_changes=(
+            # acp: model and thought_level session config options on the gateway viewer. The viewer
+            # mixes in acp_adapter/lazurio_config_options.py: its session replies carry the options,
+            # set_config_option runs them and answers with the options last shown, and its snapshot
+            # adoption, session.info projection and post-attach notices refresh them from the owner.
+            acp_adapter/gateway_server.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
           # deletion plus a new file) or changing its type always fails, allowlisted or not.

@@ -10,11 +10,16 @@ problems with it here, not upstream (see [Reporting issues](#reporting-issues)).
 
 ## How it differs from Hermes Agent
 
-Hermes Agent itself is unchanged apart from the Lazurio overlay. Today the overlay is only the
-distribution: this README, the [release runbook](../docs/operations/lazurio-fork-release.md) and
-the `lazurio-*` workflows that test and release it. Every change Lazurio makes to Hermes is listed
-in the runbook's overlay table, with why Lazurio needs it and what upstream has to ship before it
-goes away.
+Hermes Agent itself is unchanged apart from the Lazurio overlay: this README, the
+[release runbook](../docs/operations/lazurio-fork-release.md) and the `lazurio-*` workflows that
+test and release it, and these changes to Hermes' ACP server (`hermes acp`):
+
+- **Model and reasoning effort in the chat.** Sessions advertise the model and the reasoning effort
+  as ACP session config options, so Lazurio T3 Code shows a model picker and a reasoning effort
+  select; a change from any surface reaches the chat.
+
+Every change Lazurio makes to Hermes is listed in the runbook's overlay table, with why Lazurio
+needs it and what upstream has to ship before it goes away.
 
 ## Tracking upstream
 
