@@ -75,6 +75,8 @@ jobs:
             # acp: clarify for an ACP editor that answers form elicitation (listed below too): the
             # viewer's session/new asks for it with editor.lazurio_form_elicitation when the owner
             # advertises it.
+            # acp: session/resume attaches without replaying history: _resume replays only for
+            # session/load.
             acp_adapter/gateway_server.py
             # acp: clarify for an ACP editor that answers form elicitation. The owner advertises the
             # key (session_controls.py describe), accepts it (session_local_editor.py), adds the

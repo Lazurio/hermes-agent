@@ -346,7 +346,7 @@ class GatewayACPAgent(LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
         await client.rpc("session.detach", session_id=session_id, subscription_id=adopted["subscription_id"])
         return await client.rpc("session.info", session_id=session_id)
 
-    async def _resume(self, cwd, held_id, mcp_servers):
+    async def _resume(self, cwd, held_id, mcp_servers, replay=True):
         client = await self._client()
         from acp_adapter.catalog import logical_session_id
         from hermes_cli.gateway_client import GatewayRPCError
@@ -383,7 +383,8 @@ class GatewayACPAgent(LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
         if 'editor' in resume_params:
             self._editor_mcp[session_id] = resume_params['editor']
         from acp_adapter.server import _history_replay_updates
-        if self._conn:
+        # Lazurio: session/resume attaches without the history (ACP spec); session/load replays it.
+        if self._conn and replay:
             # The editor replays the live transcript in stored order, as main's ACP did; archived rows
             # (summarized away by a compression) are display-only.
             live = sorted((m for m in snapshot["messages"] if not m.get("archived")), key=lambda m: m.get("row_id") or 0)
@@ -418,7 +419,7 @@ class GatewayACPAgent(LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
         return LoadSessionResponse(**await self._resume(cwd, session_id, mcp_servers))
 
     async def resume_session(self, cwd, session_id, mcp_servers=None, **kwargs):
-        return ResumeSessionResponse(**await self._resume(cwd, session_id, mcp_servers))
+        return ResumeSessionResponse(**await self._resume(cwd, session_id, mcp_servers, replay=False))
 
     async def _cancel_admission(self, session_id, admission_id):
         client = await self._client()
