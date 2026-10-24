@@ -3,18 +3,25 @@
 An ordinary isolated gateway with an MCP server in its ``config.yaml``, the real ``hermes acp`` stdio
 process whose ``session/new`` passes the editor's own MCP server, and a loopback model that calls one
 tool per prompt. Upstream's gateway answered the configured server's tool with "MCP server
-'config_echo' is not connected" in such a session; here it answers, and so does the editor's.
+'config_echo' is not connected" in such a session; here it answers, and so does the editor's. A
+gateway whose availability verdicts expire at once builds the session's tool list with a cold check
+in the session's scope, which left the configured tool out: there the model is offered it by name.
 Overlay row: ``acp: a session whose editor passes MCP servers reaches the configured ones too``
 (docs/operations/lazurio-fork-release.md); Lazurio/hermes-agent#12.
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
+from pathlib import Path
+import signal
+import subprocess
 import sys
 import threading
 
 import pytest
 
 from tests.acp_adapter.test_gateway_sessions import editor
+from tests.waiting import wait_until
 
 # A stdio MCP server whose one tool, ``echo``, answers with its BORROWED_CREDENTIAL (``server_spec``'s peer).
 ECHO_SERVER = """import json, os, sys
@@ -39,6 +46,12 @@ CONFIGURED = {"config_echo": {"command": sys.executable, "args": ["-c", ECHO_SER
                               "env": {"BORROWED_CREDENTIAL": "FROM_CONFIG"}}}
 # Tool search off, so the model is offered the MCP tools by name, as Buddy's model was.
 DAEMON_CONFIG = {"mcp_servers": CONFIGURED, "tools": {"tool_search": {"enabled": "off"}}}
+# The cold gateway: ``tools/registry.py`` keeps no availability verdict (no TTL, no grace window), so
+# every tool list it builds probes each server afresh, the one a session's turn is built with in the
+# session's own scope. An expired verdict (30 s after the last probe) or ``/reload-mcp`` does the same.
+COLD_GATEWAY = ("import runpy, tools.registry as checks; "
+                "checks._CHECK_FN_TTL_SECONDS = checks._CHECK_FN_FAILURE_GRACE_SECONDS = 0.0; "
+                "runpy.run_module('gateway.run', run_name='__main__')")
 # The tool the loopback model calls for a prompt that names the key (a prefix of the tool's name).
 CALLS = {"CALL_CONFIGURED": "mcp__config_echo__", "CALL_EDITOR": "mcp__editor_"}
 
@@ -102,17 +115,55 @@ def model_peer():
         thread.join(timeout=5)
 
 
+@pytest.fixture
+def cold_daemon(tmp_path, model_peer):
+    """``tests/acp_adapter/conftest.py``'s ``daemon``, an ordinary isolated gateway (``(home, descriptor,
+    env, root)``), with this module's config, run as the cold gateway above."""
+    from tests.gateway.test_normal_runtime_boot import control
+    home, user = tmp_path / "state", tmp_path / "user"
+    home.mkdir(mode=0o700)
+    user.mkdir()
+    root = Path(__file__).resolve().parents[2]
+    model_url = f"http://127.0.0.1:{model_peer.server_port}/v1"
+    (home / "config.yaml").write_text(json.dumps({
+        "gateway": {"multiplex_profiles": False}, "approvals": {"mode": "manual", "timeout": 60},
+        "model": {"provider": "custom", "default": "local-wire-stub", "base_url": model_url},
+        "auxiliary": {"title_generation": {"enabled": False}}, **DAEMON_CONFIG}))
+    env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ") if k in os.environ}
+    env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
+               PYTHONUNBUFFERED="1", OPENAI_API_KEY="loopback-only", OPENAI_BASE_URL=model_url)
+    log_path = tmp_path / "gateway.log"
+    with log_path.open("w") as log:
+        process = subprocess.Popen([sys.executable, "-c", COLD_GATEWAY], cwd=root, env=env,
+                                   stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            def ready():
+                assert process.poll() is None, log_path.read_text()
+                try:
+                    descriptor = control(home, "identify")
+                except (OSError, ValueError):
+                    return None
+                return descriptor if descriptor.get("state") == "ready" else None
+            yield home, wait_until(ready, timeout=40, interval=0.1, what="the cold gateway to start"), env, root
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
 async def _prompt(acp, sid, text):
     reply = await acp.rpc("session/prompt", sessionId=sid, prompt=[{"type": "text", "text": text}])
     assert "result" in reply, reply
     return reply["result"]["stopReason"]
 
 
-@pytest.mark.platforms("linux")
-@pytest.mark.asyncio
-@pytest.mark.parametrize("daemon", [DAEMON_CONFIG], indirect=True)
-async def test_a_session_whose_editor_passes_a_server_calls_the_configured_server_too(
-        daemon, tmp_path, model_peer, server_spec):
+async def _call_the_configured_and_the_editors_tool(daemon, tmp_path, server_spec, model_peer):
+    """One session whose editor passes *server_spec*: a prompt that calls the configured server's tool, one
+    that calls the editor's. Each must be offered to the model by name and answer."""
     async with editor(daemon, tmp_path) as acp:
         assert "result" in await acp.rpc("initialize", protocolVersion=1, clientCapabilities={})
         created = await acp.rpc("session/new", cwd=str(tmp_path), mcpServers=[server_spec])
@@ -122,3 +173,18 @@ async def test_a_session_whose_editor_passes_a_server_calls_the_configured_serve
     results = dict(model_peer.tool_results)
     assert "FROM_CONFIG" in results.get("mcp__config_echo__", ""), model_peer.tool_results
     assert "PRIVATE_A" in results.get("mcp__editor_", ""), model_peer.tool_results
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("daemon", [DAEMON_CONFIG], indirect=True)
+async def test_a_session_whose_editor_passes_a_server_calls_the_configured_server_too(
+        daemon, tmp_path, model_peer, server_spec):
+    await _call_the_configured_and_the_editors_tool(daemon, tmp_path, server_spec, model_peer)
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.asyncio
+async def test_after_a_cold_check_the_session_is_offered_the_configured_tool_by_name_and_it_answers(
+        cold_daemon, tmp_path, model_peer, server_spec):
+    await _call_the_configured_and_the_editors_tool(cold_daemon, tmp_path, server_spec, model_peer)

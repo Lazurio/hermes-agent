@@ -101,8 +101,9 @@ jobs:
             gateway/session_policy.py
             gateway/session_policy_refresh.py
             # acp: a session whose editor passes MCP servers reaches the configured ones too: every MCP
-            # tool handler is registered through tools/lazurio_mcp_session_scope.py, so a configured
-            # server's tool runs without the editor session's tool scope.
+            # tool's handler and availability check are registered through
+            # tools/lazurio_mcp_session_scope.py, so a configured server's tool is checked and runs
+            # without the editor session's tool scope.
             tools/mcp_tool_registration.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
@@ -177,9 +178,10 @@ jobs:
           # upstream's real gateway and ACP stdio tests), upstream's check of every workflow's job
           # graph and triggers, which reads the lazurio-* workflows too, upstream's tests of the
           # session policy seams the clarify row touches (creation, editor policy, follow-profile,
-          # resume refresh, the runtime descriptor), and upstream's tests of the MCP registration and
-          # call seams the configured-MCP row touches (session scopes, trust, lazy start, multiplexed
-          # connection keys, the schema cache).
+          # resume refresh, the runtime descriptor), and upstream's tests of the MCP registration,
+          # availability and call seams the configured-MCP row touches (session scopes, trust, lazy
+          # start, multiplexed connection keys, the schema cache, the registry's checked tool list and
+          # the Tool Search catalog built from it).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
@@ -197,6 +199,8 @@ jobs:
             tests/tools/test_mcp_session_scope.py
             tests/tools/test_mcp_tool.py
             tests/tools/test_mcp_trust_gating.py
+            tests/tools/test_registry.py
+            tests/tools/test_tool_search.py
           )
           paths=()
           for path in "${gate[@]}"; do
