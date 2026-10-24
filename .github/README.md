@@ -27,6 +27,9 @@ test and release it, and these changes to Hermes' ACP server (`hermes acp`):
   warning about it.
 - **Buddy's memory in the chat.** The MCP servers in Hermes' configuration, such as Buddy's memory,
   work in the chat too, beside the server Lazurio T3 Code passes, as they do on Telegram.
+- **Results come back to the chat.** The commands Buddy runs in a turn the chat sent see the chat's
+  `LAZURIO_BUDDY_CHANNEL`, and only those turns: a bot task given in the chat reports back there,
+  while one given on Telegram or by another editor reports on Telegram.
 
 Every change Lazurio makes to Hermes is listed in the runbook's overlay table, with why Lazurio
 needs it and what upstream has to ship before it goes away.

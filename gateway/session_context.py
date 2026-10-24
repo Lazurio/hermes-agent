@@ -61,11 +61,15 @@ _CRON_AUTO_DELIVER_PLATFORM = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", de
 _CRON_AUTO_DELIVER_CHAT_ID = ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default=_UNSET)
 _CRON_AUTO_DELIVER_THREAD_ID = ContextVar("HERMES_CRON_AUTO_DELIVER_THREAD_ID", default=_UNSET)
 
+# Lazurio overlay: the channel the ACP viewer that submitted the executing turn declared, bound only
+# for that viewer's own turn (gateway/lazurio_buddy_channel.py); every other binding leaves it unset.
+_LAZURIO_BUDDY_CHANNEL = ContextVar("LAZURIO_BUDDY_CHANNEL", default=_UNSET)
+
 # Legacy env-var name -> ContextVar for get_session_env (_SESSION_ASYNC_DELIVERY deliberately
 # absent: it is a bool capability, read via async_delivery_supported).
 _VAR_MAP = {var.name: var for var in (
     *_SESSION_VARS, _CRON_AUTO_DELIVER_PLATFORM, _CRON_AUTO_DELIVER_CHAT_ID,
-    _CRON_AUTO_DELIVER_THREAD_ID,
+    _CRON_AUTO_DELIVER_THREAD_ID, _LAZURIO_BUDDY_CHANNEL,
 )}
 
 
@@ -158,6 +162,7 @@ def set_session_vars(
     tokens = [var.set(value) for var, value in zip(_SESSION_VARS, values)]
     tokens.append(_SESSION_ASYNC_DELIVERY.set(bool(async_delivery)))
     tokens.append(_SESSION_HISTORY_DELIVERY.set(_UNSET if session_history_delivery is None else session_history_delivery))
+    tokens.append(_LAZURIO_BUDDY_CHANNEL.set(_UNSET))  # Lazurio: a new binding names no viewer's channel
     _runtime_cwd("set_session_cwd", cwd)
     return tokens
 
@@ -172,6 +177,7 @@ def clear_session_vars(tokens: list) -> None:
         var.set("")
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
     _SESSION_HISTORY_DELIVERY.set(_UNSET)
+    _LAZURIO_BUDDY_CHANNEL.set(_UNSET)  # Lazurio: unset, so the env bridge strips it
     _runtime_cwd("clear_session_cwd")
 
 

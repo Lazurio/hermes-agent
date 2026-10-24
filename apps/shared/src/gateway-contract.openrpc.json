@@ -11396,6 +11396,18 @@
             "default": false,
             "title": "Clarify Batch",
             "type": "boolean"
+          },
+          "lazurio_buddy_channel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lazurio Buddy Channel"
           }
         },
         "required": [
