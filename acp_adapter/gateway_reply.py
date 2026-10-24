@@ -47,6 +47,8 @@ class GatewayReplyMixin:
         """Show the settled reply's unseen remainder, then end the turn: its reply's id closes, and a tool
         call it left open (blocked by a guard, an approval denied) ends ``failed``, as the in-process agent
         flushed them at turn end. Shared by ``message.complete`` and a retry's terminal receipt."""
+        # Lazurio: a reply of intentional silence shows nothing (acp_adapter/lazurio_silence.py).
+        payload = await self._lazurio_settle_silence(sid, editor_id, aid, payload)
         remainder = self._final_remainder(aid, payload)
         if remainder and self._conn:
             await self._conn.session_update(session_id=editor_id, update=self._chunk(sid, remainder))
