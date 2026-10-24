@@ -83,6 +83,9 @@ jobs:
             # acp: a reply of intentional silence (NO_REPLY, [SILENT]) sends nothing to the client
             # (listed below too): the viewer mixes in acp_adapter/lazurio_silence.py, which its
             # message.delta projection, segment boundaries, replay-gap cut and teardown call.
+            # acp: a turn's commands see the LAZURIO_BUDDY_CHANNEL of the ACP viewer that submitted
+            # it (listed below too): _client reads the field from this process's environment and the
+            # owner's runtime.describe through gateway/lazurio_buddy_channel.py, and prompt sends it.
             acp_adapter/gateway_server.py
             # acp: hermes acp --check also checks the MCP SDK: _run_check calls
             # acp_adapter/lazurio_check.py.
@@ -96,6 +99,9 @@ jobs:
             # clarify toolset at creation and keeps it where a session's toolsets are re-derived
             # (session_policy.py current_toolsets, session_policy_refresh.py resume refresh), all
             # through gateway/lazurio_editor_clarify.py.
+            # acp: a turn's commands see the LAZURIO_BUDDY_CHANNEL of the ACP viewer that submitted
+            # it (listed below too): describe advertises its capability and submission forwards the
+            # prompt.submit field to admission.
             gateway/session_controls.py
             gateway/session_local_editor.py
             gateway/session_policy.py
@@ -105,6 +111,25 @@ jobs:
             # tools/lazurio_mcp_session_scope.py, so a configured server's tool is checked and runs
             # without the editor session's tool scope.
             tools/mcp_tool_registration.py
+            # acp: a turn's commands see the LAZURIO_BUDDY_CHANNEL of the ACP viewer that submitted
+            # it, all through gateway/lazurio_buddy_channel.py. The prompt.submit contract declares
+            # the field (tui_gateway/contracts/canonical_sessions.py; apps/shared/src/gateway-contract.*
+            # are its regenerated TypeScript and OpenRPC), _submit commits it with the admission
+            # (session_authority.py), a local session's claim accepts it as its viewer's input
+            # (session_operator.py LOCAL_INPUT_FIELDS), execute_finite_admission scopes it to that
+            # admission (session_finite.py), _hmwa_prepare_turn binds it for the admission's own turn
+            # (run_turn_prepare.py), the session context declares it in _VAR_MAP and unsets it on
+            # every new or cleared binding (session_context.py), and the bash snapshot never keeps it
+            # (tools/environments/base_session_env.py).
+            apps/shared/src/gateway-contract.generated.ts
+            apps/shared/src/gateway-contract.openrpc.json
+            gateway/run_turn_prepare.py
+            gateway/session_authority.py
+            gateway/session_context.py
+            gateway/session_finite.py
+            gateway/session_operator.py
+            tools/environments/base_session_env.py
+            tui_gateway/contracts/canonical_sessions.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
           # deletion plus a new file) or changing its type always fails, allowlisted or not.
@@ -178,21 +203,34 @@ jobs:
           # upstream's real gateway and ACP stdio tests), upstream's check of every workflow's job
           # graph and triggers, which reads the lazurio-* workflows too, upstream's tests of the
           # session policy seams the clarify row touches (creation, editor policy, follow-profile,
-          # resume refresh, the runtime descriptor), and upstream's tests of the MCP registration,
+          # resume refresh, the runtime descriptor), upstream's tests of the MCP registration,
           # availability and call seams the configured-MCP row touches (session scopes, trust, lazy
           # start, multiplexed connection keys, the schema cache, the registry's checked tool list and
-          # the Tool Search catalog built from it).
+          # the Tool Search catalog built from it), and upstream's tests of the seams the channel row
+          # touches (per-turn admission fields, a local session's claim and its turn, the session
+          # context and its env bridge, the bash snapshot, the generated wire contract).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
+            tests/gateway/test_claim_reopen_off_loop.py
+            tests/gateway/test_delegation_session_id_leak.py
+            tests/gateway/test_display_admission.py
             tests/gateway/test_follow_profile_followups.py
+            tests/gateway/test_kanban_finite_admission.py
+            tests/gateway/test_local_context_ref_turn_text.py
+            tests/gateway/test_local_turn_origin_execute_code_gate.py
+            tests/gateway/test_local_viewer_events_submit.py
             tests/gateway/test_runtime_describe_skin.py
+            tests/gateway/test_session_context_inheritance.py
             tests/gateway/test_session_edit_policy.py
+            tests/gateway/test_session_env.py
             tests/gateway/test_session_follow_profile_config.py
             tests/gateway/test_session_policy.py
             tests/gateway/test_session_policy_coding_posture.py
             tests/gateway/test_session_policy_refusal_fields.py
             tests/gateway/test_session_resume_config_refresh.py
+            tests/gateway/test_surface_admission.py
+            tests/tools/test_local_env_session_leak.py
             tests/tools/test_mcp_lazy_start.py
             tests/tools/test_mcp_multiplex_connection_keys.py
             tests/tools/test_mcp_schema_cache.py
@@ -200,7 +238,10 @@ jobs:
             tests/tools/test_mcp_tool.py
             tests/tools/test_mcp_trust_gating.py
             tests/tools/test_registry.py
+            tests/tools/test_snapshot_multiline_session_env_injection.py
+            tests/tools/test_snapshot_session_id_leak.py
             tests/tools/test_tool_search.py
+            tests/tui_gateway/contracts/test_generated.py
           )
           paths=()
           for path in "${gate[@]}"; do

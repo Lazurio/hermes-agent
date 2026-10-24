@@ -228,6 +228,9 @@ class CanonicalSubmitParams(CanonicalSessionParams):
     # The submitter answers the clarify tool's whole batch in one ``clarify`` server request (main's
     # batch panel); without it the turn's viewers get one ``clarify.request`` card per question.
     clarify_batch: bool = False
+    # Lazurio overlay: the submitting ACP viewer's LAZURIO_BUDDY_CHANNEL, committed per admission
+    # (``lazurio_buddy_channel_v1``) and exported to that turn's commands (gateway/lazurio_buddy_channel.py).
+    lazurio_buddy_channel: str | None = None
 
 
 class CanonicalVoiceStopped(Result):

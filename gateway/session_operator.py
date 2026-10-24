@@ -6,10 +6,12 @@ path. Only SessionAuthority.submit writes this envelope after authorization;
 public submission parameters cannot supply it.
 """
 from hermes_state_runtime import RuntimeStoreError
+# Lazurio: the submitting ACP viewer's channel (gateway/lazurio_buddy_channel.py).
+from gateway.lazurio_buddy_channel import PAYLOAD_KEY as LAZURIO_CHANNEL
 
 # Fields ``SessionAuthority.submit`` commits for a local session's input; producers commit their own envelope.
 LOCAL_INPUT_FIELDS = frozenset({'text', 'attachments_v1', 'finite', 'unattended', 'surface_v1', 'display_v1',
-                                'cli_turn_v1', 'kanban_card_v1'})
+                                'cli_turn_v1', 'kanban_card_v1', LAZURIO_CHANNEL})
 
 
 def is_viewer_input(row):

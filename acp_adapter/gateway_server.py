@@ -123,6 +123,8 @@ class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfi
         # Session -> the owner's latest usage dict (``session.usage`` / ``session.stats``).
         self._usage = {}
         self._background = set()
+        # Lazurio: the ``prompt.submit`` field with this viewer's channel, per connection (``_client``).
+        self._lazurio_channel = {}
 
     def on_connect(self, conn):
         self._conn = conn
@@ -167,6 +169,10 @@ class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfi
                     descriptor = await gateway.rpc("runtime.describe")
                     if descriptor.get("profile_id") != str(self._home):
                         raise GatewayClientError("profile_mismatch")
+                    # Lazurio: this viewer's LAZURIO_BUDDY_CHANNEL goes with its turns to an owner that
+                    # takes it (gateway/lazurio_buddy_channel.py).
+                    from gateway.lazurio_buddy_channel import viewer_fields
+                    self._lazurio_channel = viewer_fields(descriptor)
                     await self._reattach(gateway)
                 except BaseException:
                     await connection.__aexit__(None, None, None)
@@ -671,7 +677,8 @@ class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfi
             # Inside the try: a failed reconnect is as ambiguous for a retained identity as a lost ack.
             client = await self._client()
             link, resumes = self._link, self._resumes.get(session_id, 0)
-            receipt = await client.rpc("prompt.submit", session_id=session_id, input_id=input_id, **submit)
+            receipt = await client.rpc("prompt.submit", session_id=session_id, input_id=input_id, **submit,
+                                       **self._lazurio_channel)  # Lazurio: this viewer's channel
         except BaseException as exc:
             from hermes_cli.gateway_client import GatewayRPCError
             if not isinstance(exc, GatewayRPCError):

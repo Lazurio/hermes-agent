@@ -73,8 +73,11 @@ async def execute_finite_admission(authority, ref, row):
     from gateway.session_display import display_turn_scope
     from gateway.session_surface import surface_turn_scope
     from gateway.session_cli_turn import cli_turn_scope
+    # Lazurio: the submitting ACP viewer's channel (gateway/lazurio_buddy_channel.py).
+    from gateway.lazurio_buddy_channel import PAYLOAD_KEY as LAZURIO_CHANNEL, admission_scope as lazurio_channel_scope
     with finite_turn_scope(row['payload'].get('finite', False), row['payload'].get('unattended') is True), \
             surface_turn_scope(row['payload'].get('surface_v1')), \
             display_turn_scope(row['admission_id'], row['payload'].get('display_v1')), \
-            cli_turn_scope(row['admission_id'], row['payload'].get('cli_turn_v1')):
+            cli_turn_scope(row['admission_id'], row['payload'].get('cli_turn_v1')), \
+            lazurio_channel_scope(row['admission_id'], row['payload'].get(LAZURIO_CHANNEL)):
         return await execute_admission(authority, ref, row)

@@ -491,13 +491,14 @@ class AuthorityConnection:
 
     async def describe(self, ref, params):
         await self.ping(ref, params)
+        from gateway.lazurio_buddy_channel import CAPABILITY as LAZURIO_BUDDY_CHANNEL
         from gateway.lazurio_editor_clarify import CAPABILITY as LAZURIO_FORM_CLARIFY
         from gateway.session_policy import CREATE_FIELDS, SURFACES
         from gateway.session_skin import resolved_skin
         return {'instance_id': self.authority.instance_id, 'profile_id': self.authority.profile_id,
                 'authority_epoch': self.authority.epoch,
                 'capabilities': ['durable-admission-v1', 'event-replay-v1', 'local-cli-create-v1', 'acp-editor-policy-v1', 'acp-session-mcp-v1',
-                                 LAZURIO_FORM_CLARIFY],
+                                 LAZURIO_FORM_CLARIFY, LAZURIO_BUDDY_CHANNEL],
                 'session_create': {'sources': sorted(SURFACES),
                                    'parameters': sorted(CREATE_FIELDS | {'title'})},
                 # Main's ``gateway.ready.skin``: the canonical client's own ready carries it.
@@ -750,9 +751,11 @@ class AuthorityConnection:
         """The admission a ``prompt.submit``-shaped request asks for (``prompt.replace_queued`` too)."""
         if ref.session_id not in self.subscriptions:
             raise RuntimeStoreError('permission_denied')
+        # Lazurio: the submitting ACP viewer's channel (gateway/lazurio_buddy_channel.py).
+        from gateway.lazurio_buddy_channel import SUBMIT_KEY as LAZURIO_CHANNEL, submit_fields as lazurio_channel
         forbidden = set(params) - {'session_id', 'text', 'submission_id', 'input_id', 'queued', 'attachments', 'finite', 'unattended',
                                    'surface', 'voice_context', 'interrupted', 'voice_turn', 'display_kind', 'title_preview',
-                                   'turn_author', 'api_text', 'model_override', 'clarify_batch'}
+                                   'turn_author', 'api_text', 'model_override', 'clarify_batch', LAZURIO_CHANNEL}
         if forbidden:
             raise RuntimeStoreError('invalid_params')
         request_id = params.get('submission_id') or params.get('input_id')
@@ -763,7 +766,7 @@ class AuthorityConnection:
         from gateway.session_surface import submit_surface_fields
         from gateway.session_cli_turn import submit_cli_turn_fields
         payload = {'text': params.get('text'), **admit_finite(params, submitter=(self, ref)), **submit_surface_fields(params),
-                   **submit_display_fields(params), **submit_cli_turn_fields(params)}
+                   **submit_display_fields(params), **submit_cli_turn_fields(params), **lazurio_channel(params)}
         if 'attachments' in params:
             payload['attachments'] = params['attachments']
         return Submission(request_id, ref, payload, 'queue')
