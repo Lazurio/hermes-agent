@@ -17,6 +17,7 @@ import pytest
 
 from acp_adapter.gateway_server import GatewayACPAgent
 from gateway.run_turn import _unexpected_silence_reply
+from tests.waiting import async_wait_until
 
 # Each marker as the model streams it, in several deltas.
 MARKERS = {"NO_REPLY": ["NO", "_REP", "LY"], "[SILENT]": ["[", "SIL", "ENT]"], "*NO_REPLY*": ["*", "NO_REPLY", "*"]}
@@ -200,6 +201,84 @@ async def test_a_final_that_starts_like_a_marker_after_shown_commentary_and_a_to
     # The commentary's chunks share one message; the reply after the tool call opens the next one.
     assert len({message_id for _, message_id in commentary}) == len({message_id for _, message_id in final}) == 1
     assert commentary[0][1] != final[0][1]
+
+
+def by_message(updates):
+    """``[(messageId, text)]`` of the message chunks, one entry per message, in order."""
+    return [(message_id, "".join(text for text, _ in chunks))
+            for message_id, chunks in groupby(message_chunks(updates), key=lambda chunk: chunk[1])]
+
+
+@pytest.mark.asyncio
+async def test_a_final_after_a_boundary_without_a_tool_call_is_shown_once_in_its_own_message():
+    """Pablo's probe on #11: commentary, the owner's boundary delta, a final that starts like a marker and its
+    completion. The final is measured on its own segment, never appended a second time."""
+    async with viewer() as agent:
+        _, updates = await turn(agent, "a1", deltas("Checking.", None, "No", " problem.") + complete("No problem."))
+    (first, commentary), (second, final) = by_message(updates)
+    assert (commentary, final) == ("Checking.", "No problem.") and first != second
+
+
+async def started_turn(agent):
+    """A prompt whose admission ``a1`` the owner has started; a replay gap re-attaches it as started."""
+    async def answer(method, **params):
+        if method == "prompt.submit":
+            return {"admission_id": "a1", "status": "queued"}
+        assert method == "session.resume", method
+        return {"replay_epoch": "e2", "last_sequence": 0, "prompts": [], "resumed": True,
+                "pending": [{"admission_id": "a1", "status": "started"}]}
+
+    agent._conn.session_update.reset_mock()
+    agent._gateway.rpc.side_effect = answer
+    prompt = asyncio.create_task(agent.prompt([acp.text_block("hello")], "s"))
+    await async_wait_until(lambda: agent._admissions.get("s") == "a1")
+    return prompt
+
+
+async def across_a_replay_gap(agent, before, after):
+    """Play *before*, a replay gap the pump re-attaches the started turn across, then *after*."""
+    prompt = await started_turn(agent)
+    for kind, payload in before + [("session.replay_gap", {})]:
+        agent._gateway.publish("a1", kind, payload)
+    await async_wait_until(lambda: agent._snapshots["s"].get("resumed") and "a1" in agent._cut)
+    for kind, payload in after:
+        agent._gateway.publish("a1", kind, payload)
+    response = await asyncio.wait_for(prompt, 5)
+    assert agent._failure is None
+    return response.stop_reason, updates_of(agent)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after", [[("message.interim", {"text": "No", "already_streamed": True})] + complete(""),
+                                   complete("")], ids=["an interim the owner streamed", "no interim"])
+async def test_text_held_when_a_replay_gap_cut_the_reply_is_not_lost(after):
+    """Pablo's probe on #11: held ``No``, a gap re-attaches the started turn, an interim ``No`` that the owner
+    already streamed and an empty completion. Before the hold the editor showed ``No``; it still does, once."""
+    async with viewer() as agent:
+        stop_reason, updates = await across_a_replay_gap(agent, deltas("No"), after)
+    assert stop_reason == "end_turn"
+    assert [text for text, _ in message_chunks(updates)] == ["No"]
+
+
+@pytest.mark.asyncio
+async def test_text_held_when_a_replay_gap_cut_the_reply_is_shown_once_with_the_rest():
+    async with viewer() as agent:
+        _, updates = await across_a_replay_gap(agent, deltas("No"), complete("No problem, nothing changed."))
+    assert "".join(text for text, _ in message_chunks(updates)) == "No problem, nothing changed."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before,final", [
+    *((deltas(*MARKERS["NO_REPLY"]), final) for final in ["", None, _unexpected_silence_reply(), "NO_REPLY"]),
+    (deltas("NO", "_REP"), "NO_REPLY")],
+    ids=["the marker held, settled with nothing", "the marker held, settled with no text",
+         "the marker held, the owner's notice in its place", "the marker held, settled with the marker",
+         "cut mid-marker, settled with the marker"])
+async def test_a_silent_reply_a_replay_gap_cut_sends_no_message_chunk(before, final):
+    async with viewer() as agent:
+        stop_reason, updates = await across_a_replay_gap(agent, before, complete(final))
+    assert stop_reason == "end_turn"
+    assert message_chunks(updates) == []
 
 
 @pytest.mark.asyncio
