@@ -100,6 +100,10 @@ jobs:
             gateway/session_local_editor.py
             gateway/session_policy.py
             gateway/session_policy_refresh.py
+            # acp: a session whose editor passes MCP servers reaches the configured ones too: every MCP
+            # tool handler is registered through tools/lazurio_mcp_session_scope.py, so a configured
+            # server's tool runs without the editor session's tool scope.
+            tools/mcp_tool_registration.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
           # deletion plus a new file) or changing its type always fails, allowlisted or not.
@@ -171,9 +175,11 @@ jobs:
           set -euo pipefail
           # The fixed gate: upstream's ACP adapter tests (the seams of the ACP overlay rows, with
           # upstream's real gateway and ACP stdio tests), upstream's check of every workflow's job
-          # graph and triggers, which reads the lazurio-* workflows too, and upstream's tests of the
+          # graph and triggers, which reads the lazurio-* workflows too, upstream's tests of the
           # session policy seams the clarify row touches (creation, editor policy, follow-profile,
-          # resume refresh, the runtime descriptor).
+          # resume refresh, the runtime descriptor), and upstream's tests of the MCP registration and
+          # call seams the configured-MCP row touches (session scopes, trust, lazy start, multiplexed
+          # connection keys, the schema cache).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
@@ -185,6 +191,12 @@ jobs:
             tests/gateway/test_session_policy_coding_posture.py
             tests/gateway/test_session_policy_refusal_fields.py
             tests/gateway/test_session_resume_config_refresh.py
+            tests/tools/test_mcp_lazy_start.py
+            tests/tools/test_mcp_multiplex_connection_keys.py
+            tests/tools/test_mcp_schema_cache.py
+            tests/tools/test_mcp_session_scope.py
+            tests/tools/test_mcp_tool.py
+            tests/tools/test_mcp_trust_gating.py
           )
           paths=()
           for path in "${gate[@]}"; do
