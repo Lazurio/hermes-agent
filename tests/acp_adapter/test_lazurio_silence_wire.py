@@ -3,10 +3,10 @@
 An ordinary isolated gateway, the real ``hermes acp`` stdio process and a loopback model that streams
 its reply in several deltas. Upstream's viewer passes the streamed ``NO_REPLY`` on and then the
 owner's notice that the model returned only a silence marker (the owner cannot tell an editor's
-prompt from a person's message); here the editor gets no ``agent_message_chunk`` for that turn, and
-a reply that only starts like a marker arrives whole, in order and in one message. Overlay row:
-``acp: a reply of intentional silence (NO_REPLY, [SILENT]) sends nothing to the client``
-(docs/operations/lazurio-fork-release.md).
+prompt from a person's message); here the editor gets no ``agent_message_chunk`` for that reply, also
+when it follows commentary and a tool call, and a reply that only starts like a marker arrives whole,
+in order and in one message. Overlay row: ``acp: a reply of intentional silence (NO_REPLY,
+[SILENT]) sends nothing to the client`` (docs/operations/lazurio-fork-release.md).
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -16,8 +16,15 @@ import pytest
 
 from tests.acp_adapter.test_gateway_sessions import editor
 
-# The deltas the loopback model streams for a prompt that names the key.
-REPLIES = {"SILENT_PROBE": ["NO", "_REP", "LY"], "STARTS_LIKE_PROBE": ["No", " problem, NO_REPLY", " is only a marker."]}
+# The deltas the loopback model streams for a prompt that names the key. A ``LOOKUP_`` key is first
+# answered with commentary and a ``read_file`` call (Buddy checking his list), and with its reply
+# after the tool's result.
+REPLIES = {"SILENT_PROBE": ["NO", "_REP", "LY"], "STARTS_LIKE_PROBE": ["No", " problem, NO_REPLY", " is only a marker."],
+           "LOOKUP_THEN_SILENT": ["NO", "_REP", "LY"], "LOOKUP_THEN_REPLY": ["No", " problem", ", nothing changed."]}
+LOOKUP = ["Podívám se", " do seznamu."]
+LISTS = "delegace.txt"
+LOOKUP_CALL = {"index": 0, "id": "call_lookup", "type": "function",
+               "function": {"name": "read_file", "arguments": json.dumps({"path": LISTS})}}
 
 
 class ScriptedModel(BaseHTTPRequestHandler):
@@ -32,9 +39,11 @@ class ScriptedModel(BaseHTTPRequestHandler):
 
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        last = json.dumps(next((m.get("content", "") for m in reversed(request.get("messages", []))
-                                if m.get("role") == "user"), ""))
-        parts = next((reply for key, reply in REPLIES.items() if key in last), ["LOCAL_ACK"])
+        messages = request.get("messages") or [{}]
+        last = json.dumps(next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), ""))
+        key = next((key for key in REPLIES if key in last), None)
+        lookup = bool(key and key.startswith("LOOKUP_") and messages[-1].get("role") != "tool")
+        parts = LOOKUP if lookup else REPLIES.get(key, ["LOCAL_ACK"])
         base = {"id": "chatcmpl-local", "model": "local-wire-stub", "created": 1}
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream" if request.get("stream") else "application/json")
@@ -45,7 +54,9 @@ class ScriptedModel(BaseHTTPRequestHandler):
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}).encode())
             return
         deltas = [{"role": "assistant", "content": parts[0]}, *({"content": part} for part in parts[1:])]
-        for delta, finish in [*((delta, None) for delta in deltas), ({}, "stop")]:
+        if lookup:
+            deltas.append({"tool_calls": [LOOKUP_CALL]})
+        for delta, finish in [*((delta, None) for delta in deltas), ({}, "tool_calls" if lookup else "stop")]:
             chunk = {**base, "object": "chat.completion.chunk",
                      "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
             self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
@@ -67,14 +78,30 @@ def model_peer():
         thread.join(timeout=5)
 
 
+async def _session(acp, tmp_path):
+    assert "result" in await acp.rpc("initialize", protocolVersion=1, clientCapabilities={})
+    return (await acp.rpc("session/new", cwd=str(tmp_path), mcpServers=[]))["result"]["sessionId"]
+
+
 async def _prompt(acp, sid, text):
-    """``(stop reason, [(text, messageId)] of the turn's agent_message_chunk updates)``."""
+    """``(stop reason, the turn's session updates)``."""
     start = len(acp.frames)
     reply = await acp.rpc("session/prompt", sessionId=sid, prompt=[{"type": "text", "text": text}])
     assert "result" in reply, reply
-    updates = [frame["params"]["update"] for frame in acp.frames[start:] if frame.get("method") == "session/update"]
-    return reply["result"]["stopReason"], [(update["content"]["text"], update.get("messageId")) for update in updates
-                                           if update["sessionUpdate"] == "agent_message_chunk"]
+    return reply["result"]["stopReason"], [frame["params"]["update"] for frame in acp.frames[start:]
+                                           if frame.get("method") == "session/update"]
+
+
+def _chunks(updates):
+    """``[(text, messageId)]`` of the ``agent_message_chunk`` updates."""
+    return [(u["content"]["text"], u.get("messageId")) for u in updates if u["sessionUpdate"] == "agent_message_chunk"]
+
+
+def _around_the_tool_call(updates):
+    """The message chunks before the tool call and after its completion."""
+    kinds = [update["sessionUpdate"] for update in updates]
+    assert "tool_call" in kinds and "tool_call_update" in kinds, kinds
+    return _chunks(updates[:kinds.index("tool_call")]), _chunks(updates[kinds.index("tool_call_update") + 1:])
 
 
 @pytest.mark.platforms("linux")
@@ -82,12 +109,32 @@ async def _prompt(acp, sid, text):
 async def test_a_silent_reply_reaches_the_editor_as_nothing_and_one_that_starts_like_it_arrives_whole(
         daemon, tmp_path, model_peer):
     async with editor(daemon, tmp_path) as acp:
-        assert "result" in await acp.rpc("initialize", protocolVersion=1, clientCapabilities={})
-        sid = (await acp.rpc("session/new", cwd=str(tmp_path), mcpServers=[]))["result"]["sessionId"]
-        stop_reason, chunks = await _prompt(acp, sid, "SILENT_PROBE anything new?")
+        sid = await _session(acp, tmp_path)
+        stop_reason, updates = await _prompt(acp, sid, "SILENT_PROBE anything new?")
         assert stop_reason == "end_turn"
-        assert chunks == []
-        stop_reason, chunks = await _prompt(acp, sid, "STARTS_LIKE_PROBE and now?")
+        assert _chunks(updates) == []
+        stop_reason, updates = await _prompt(acp, sid, "STARTS_LIKE_PROBE and now?")
         assert stop_reason == "end_turn"
-        assert "".join(text for text, _ in chunks) == "No problem, NO_REPLY is only a marker."
-        assert len({message_id for _, message_id in chunks}) == 1
+        assert "".join(text for text, _ in _chunks(updates)) == "No problem, NO_REPLY is only a marker."
+        assert len({message_id for _, message_id in _chunks(updates)}) == 1
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.asyncio
+async def test_after_commentary_and_a_tool_call_a_silent_reply_sends_nothing_and_a_reply_arrives_whole(
+        daemon, tmp_path, model_peer):
+    (tmp_path / LISTS).write_text("nic nového\n")
+    async with editor(daemon, tmp_path) as acp:
+        sid = await _session(acp, tmp_path)
+        stop_reason, updates = await _prompt(acp, sid, "LOOKUP_THEN_SILENT anything new?")
+        assert stop_reason == "end_turn"
+        before, after = _around_the_tool_call(updates)
+        assert "".join(text for text, _ in before) == "Podívám se do seznamu."
+        assert after == []
+        stop_reason, updates = await _prompt(acp, sid, "LOOKUP_THEN_REPLY and now?")
+        assert stop_reason == "end_turn"
+        before, after = _around_the_tool_call(updates)
+        assert "".join(text for text, _ in before) == "Podívám se do seznamu."
+        assert "".join(text for text, _ in after).strip() == "No problem, nothing changed."
+        assert len({message_id for _, message_id in after}) == 1
+        assert {message_id for _, message_id in before}.isdisjoint(message_id for _, message_id in after)

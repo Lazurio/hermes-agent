@@ -986,7 +986,7 @@ class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfi
             await self._project_tool(kind, sid, editor_id, aid, payload)
             return
         if kind == "message.delta":
-            text = self._lazurio_unheld(aid, _text(payload))  # Lazurio: nothing while it may be a silence marker
+            text = self._lazurio_unheld(aid, payload)  # Lazurio: nothing while it may be a silence marker
             self._streamed[aid] = self._streamed.get(aid, "") + text
             if text and self._conn:
                 await self._conn.session_update(session_id=editor_id, update=self._chunk(sid, text))

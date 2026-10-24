@@ -9,6 +9,7 @@ row: ``acp: a reply of intentional silence (NO_REPLY, [SILENT]) sends nothing to
 """
 import asyncio
 from contextlib import asynccontextmanager
+from itertools import groupby
 from unittest.mock import AsyncMock
 
 import acp
@@ -142,6 +143,63 @@ async def test_what_a_segment_held_goes_out_before_its_tool_call_and_a_silent_fi
                                 + deltas("NO_", "REPLY") + complete(""))
     assert [update.session_update for update in updates] == ["agent_message_chunk", "tool_call", "tool_call_update"]
     assert updates[0].content.text == "No"
+
+
+@pytest.mark.asyncio
+async def test_what_a_segment_held_goes_out_before_interim_commentary_and_a_silent_final_after_it_sends_nothing():
+    interim = ("message.interim", {"text": "Checking the list.", "already_streamed": False})
+    async with viewer() as agent:
+        _, updates = await turn(agent, "a1", deltas("No") + [interim] + deltas("NO_", "REPLY") + complete(""))
+    assert [text for text, _ in message_chunks(updates)] == ["No", "Checking the list.\n\n"]
+
+
+# Buddy looks something up (``delegace seznam``) and then decides, as the owner streams it: commentary
+# the editor is shown at once, the end of that segment (a delta without text, which the agent sends
+# before it runs its tools), the tool call, and the final reply as a segment of its own, which the
+# agent opens with a paragraph break.
+COMMENTARY = deltas("Podívám se", " do seznamu.", None)
+TOOL_CALL = [("tool.start", {"tool_call_id": "t1", "tool_name": "terminal", "args": {"command": "delegace seznam"}}),
+             ("tool.complete", {"tool_call_id": "t1", "tool_name": "terminal", "result": "nic nového"})]
+
+
+def kinds_in_order(updates):
+    """The updates' kinds with each run of chunks counted once (how the text is split is not the point)."""
+    return [kind for kind, _ in groupby(update.session_update for update in updates)]
+
+
+def message_chunks_around_the_tool_call(updates):
+    """``(before, after)``: the message chunks before the tool call and after its completion."""
+    kinds = [update.session_update for update in updates]
+    return (message_chunks(updates[:kinds.index("tool_call")]),
+            message_chunks(updates[kinds.index("tool_call_update") + 1:]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final", ["", None, _unexpected_silence_reply(), "NO_REPLY"])
+# The boundary comes before the agent's tool round whether or not a tool then starts: a call stopped
+# before it runs projects no ``tool.start``.
+@pytest.mark.parametrize("tool", [TOOL_CALL, []], ids=["a tool ran", "no tool started"])
+async def test_a_silent_final_after_shown_commentary_sends_no_chunk_of_the_marker(tool, final):
+    async with viewer() as agent:
+        stop_reason, updates = await turn(agent, "a1", COMMENTARY + tool + deltas("\n\nNO", "_REP", "LY")
+                                          + complete(final))
+    assert stop_reason == "end_turn"
+    assert kinds_in_order(updates) == ["agent_message_chunk", *(["tool_call", "tool_call_update"] if tool else [])]
+    assert "".join(text for text, _ in message_chunks(updates)) == "Podívám se do seznamu."
+
+
+@pytest.mark.asyncio
+async def test_a_final_that_starts_like_a_marker_after_shown_commentary_and_a_tool_call_arrives_whole_in_its_bubble():
+    async with viewer() as agent:
+        _, updates = await turn(agent, "a1", COMMENTARY + TOOL_CALL + deltas("\n\nNo", " problem", ", nothing changed.")
+                                + complete("No problem, nothing changed."))
+    assert kinds_in_order(updates) == ["agent_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk"]
+    commentary, final = message_chunks_around_the_tool_call(updates)
+    assert "".join(text for text, _ in commentary) == "Podívám se do seznamu."
+    assert "".join(text for text, _ in final) == "\n\nNo problem, nothing changed."
+    # The commentary's chunks share one message; the reply after the tool call opens the next one.
+    assert len({message_id for _, message_id in commentary}) == len({message_id for _, message_id in final}) == 1
+    assert commentary[0][1] != final[0][1]
 
 
 @pytest.mark.asyncio
