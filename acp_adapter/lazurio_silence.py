@@ -13,17 +13,19 @@ cannot tell from a person's message (T3 Code posts Buddy's notices as prompts in
 gateway's notice that the model returned only a silence marker. A reply settled from a receipt (a
 retry, a replay gap) carried the raw marker.
 
-Here the viewer applies the gateway's rules with the gateway's predicates. A reply segment's deltas
-are held while the segment so far may still be a bare marker and go out at once, in order and under
-the segment's ``messageId``, as soon as it cannot. A segment that ends at a tool call or interim
-commentary is commentary, never the final reply, so what it held goes out before that boundary, as
-the gateway's stream consumer flushes at a segment break. At the turn's end a held segment that is a
-bare marker is dropped and any other held text is shown. A reply that streamed as a bare marker, or
-whose final text is one, is intentional silence: on a turn that did not fail the editor gets no
-``agent_message_chunk`` for it, neither the marker nor the owner's notice in its place, and the turn
-ends as it would have (its stop reason, the owner's transcript and history unchanged). Thought
-chunks, tool calls and every other update pass untouched; prose that mentions ``NO_REPLY`` is no
-marker and is delivered.
+Here the viewer applies the gateway's rules with the gateway's predicates, per reply segment. A
+segment's deltas are held while the segment so far may still be a bare marker and go out at once, in
+order and under the segment's ``messageId``, as soon as it cannot. A segment ends where the gateway's
+stream consumer breaks one: at the owner's segment boundary (a delta without text, which the agent
+sends before it runs its tools, whether or not a tool then starts), a tool call or interim
+commentary. Such a segment is commentary, never the final reply, so what it held goes out before
+that boundary, and the next segment is held from its first delta again. At the turn's end a held
+segment that is a bare marker is dropped and any other held text is shown. A reply that streamed as
+a bare marker, or whose final text is one, is intentional silence: on a turn that did not fail the
+editor gets no ``agent_message_chunk`` for it, neither the marker nor the owner's notice in its
+place, however much commentary came before it, and the turn ends as it would have (its stop reason,
+the owner's transcript and history unchanged). Thought chunks, tool calls and every other update pass
+untouched; prose that mentions ``NO_REPLY`` is no marker and is delivered.
 
 Overlay row ``acp: a reply of intentional silence (NO_REPLY, [SILENT]) sends nothing to the client``
 (docs/operations/lazurio-fork-release.md). Removal: when upstream's ACP path (the gateway viewer, or
@@ -32,6 +34,7 @@ prompt too.
 """
 from __future__ import annotations
 
+from acp_adapter.gateway_reply import _text
 from gateway.response_filters import is_intentional_silence_response, is_partial_silence_marker
 
 
@@ -47,29 +50,41 @@ def _may_become_silence(text: str) -> bool:
 class LazurioSilenceMixin:
     """Mixed into ``GatewayACPAgent`` (``acp_adapter/gateway_server.py``), whose ``message.delta``
     projection, segment boundaries, replay-gap cut (``_recover``) and ``_teardown`` call the hooks
-    below, as does ``GatewayReplyMixin._finish_reply``. Like ``_streamed``, which keeps meaning what
-    the editor was shown, the held text is per admission."""
+    below, as does ``GatewayReplyMixin._finish_reply``. The held text is per admission and segment.
+    ``_streamed`` keeps meaning what the editor was shown, but upstream resets it only at a tool call
+    or interim commentary, never at the owner's boundary delta, so a boundary marks the next segment
+    itself."""
 
     def _lazurio_held(self) -> dict:
-        # admission -> the start of its current reply segment, received but not shown yet
+        # admission -> the start of its current reply segment, received but not shown yet; "" marks a
+        # segment a boundary opened that has shown nothing so far
         return self.__dict__.setdefault("_lazurio_silence_held", {})
 
-    def _lazurio_unheld(self, aid, text):
-        """The part of a reply delta the editor sees now: ``""`` while the segment so far may still be
-        a bare marker, then everything held with it, in order."""
+    def _lazurio_unheld(self, aid, payload):
+        """The text of a ``message.delta`` the editor sees now: ``""`` while the segment so far may still
+        be a bare marker, then everything held with it, in order. A delta without text is the owner's
+        segment boundary: what the segment that ends there held goes out with it."""
         held = self._lazurio_held()
+        if payload.get("text") is None:
+            shown, held[aid] = held.get(aid, ""), ""
+            return shown
+        text = _text(payload)
         if aid not in held and self._streamed.get(aid):
-            return text  # the segment already shows text, so it is no bare marker
+            return text  # this segment already shows text, so it is no bare marker
         segment = held.pop(aid, "") + text
-        if segment and _may_become_silence(segment):
+        if _may_become_silence(segment):
             held[aid] = segment
             return ""
         return segment
 
     async def _lazurio_show_held(self, kind, sid, editor_id, aid):
-        """Before a segment boundary (a tool call, interim commentary): the segment that ends there is
-        commentary, so the editor sees what it held now, under the segment's ``messageId``."""
-        if kind in {"tool.start", "message.interim"} and (text := self._lazurio_held().pop(aid, "")):
+        """Before a tool call or interim commentary: the segment that ends there is commentary, so the
+        editor sees what it held now, under the segment's ``messageId``, and the next one starts held."""
+        if kind not in {"tool.start", "message.interim"}:
+            return
+        held = self._lazurio_held()
+        text, held[aid] = held.get(aid, ""), ""
+        if text:
             await self._lazurio_show(sid, editor_id, aid, text)
 
     async def _lazurio_settle_silence(self, sid, editor_id, aid, payload):
