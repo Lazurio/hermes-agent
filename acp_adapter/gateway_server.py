@@ -18,6 +18,7 @@ from hermes_cli.gateway_client import GatewayClientError, connect_gateway
 from hermes_constants import get_hermes_home
 from acp_adapter.gateway_reply import GatewayReplyMixin, _text
 from acp_adapter.lazurio_config_options import LazurioConfigOptionsMixin
+from acp_adapter.lazurio_silence import LazurioSilenceMixin
 from acp_adapter.lazurio_stop_and_send import LazurioStopAndSendMixin
 from acp_adapter.session import _translate_acp_cwd, _normalize_cwd_for_compare
 
@@ -66,7 +67,7 @@ def _tools_changed_notice(payload):
     return f"Editor MCP tools changed (servers: {servers}); the new tool list applies from the next turn.\n"
 
 
-class GatewayACPAgent(LazurioStopAndSendMixin, LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
+class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
     def __init__(self):
         self._conn = None
         self._gateway = None
@@ -259,6 +260,7 @@ class GatewayACPAgent(LazurioStopAndSendMixin, LazurioConfigOptionsMixin, Gatewa
         self._segments.clear()
         self._message_ids.clear()
         self._cut.clear()
+        self._lazurio_held().clear()  # Lazurio: and what they held back as a possible silence marker
         async with self._changed:
             # Every waiter on the old transport wakes to its ambiguous failure, even one that had
             # not yet observed ``_failure`` before it is cleared here.
@@ -812,6 +814,8 @@ class GatewayACPAgent(LazurioStopAndSendMixin, LazurioConfigOptionsMixin, Gatewa
         if status in ("queued", "unknown") or {admission_id} & (
                 self._terminals.keys() | self._settling | self._receipted.keys()):
             return
+        # Lazurio: text held back as a possible silence marker was never shown; the completion owes it.
+        self._lazurio_held().pop(admission_id, None)
         self._cut.setdefault(admission_id, self._streamed.pop(admission_id, ""))
         if status:
             return
@@ -965,6 +969,8 @@ class GatewayACPAgent(LazurioStopAndSendMixin, LazurioConfigOptionsMixin, Gatewa
             return
         if await self._gap_guard(kind, sid, aid):
             return
+        # Lazurio: what a segment held back as a possible silence marker is shown before its boundary.
+        await self._lazurio_show_held(kind, sid, editor_id, aid)
         if kind in {"approval.request", "clarify.request"}:
             self._permission(sid, payload)
             return
@@ -980,7 +986,7 @@ class GatewayACPAgent(LazurioStopAndSendMixin, LazurioConfigOptionsMixin, Gatewa
             await self._project_tool(kind, sid, editor_id, aid, payload)
             return
         if kind == "message.delta":
-            text = _text(payload)
+            text = self._lazurio_unheld(aid, _text(payload))  # Lazurio: nothing while it may be a silence marker
             self._streamed[aid] = self._streamed.get(aid, "") + text
             if text and self._conn:
                 await self._conn.session_update(session_id=editor_id, update=self._chunk(sid, text))

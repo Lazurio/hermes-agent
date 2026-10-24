@@ -22,6 +22,9 @@ test and release it, and these changes to Hermes' ACP server (`hermes acp`):
 - **Sending while Buddy works.** When the chat stops a running turn to send a new message, the
   message reaches Hermes with the request it interrupted, as Hermes' own ACP server did, so it
   corrects that request instead of replacing it.
+- **Silence stays silent.** When Buddy has nothing new to say and answers with Hermes' silence
+  marker (`NO_REPLY`), the chat shows nothing, as Telegram does: neither the marker nor Hermes'
+  warning about it.
 
 Every change Lazurio makes to Hermes is listed in the runbook's overlay table, with why Lazurio
 needs it and what upstream has to ship before it goes away.
