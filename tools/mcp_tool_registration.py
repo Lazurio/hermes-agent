@@ -20,6 +20,7 @@ from tools.mcp_tool_handlers import (
 from tools.mcp_tool_schema import (
     _UTILITY_CAPABILITY_ATTRS, _build_utility_schemas, _normalize_name_filter, matches_name_filter)
 from tools.mcp_tool_scope import _key_name, _key_scope, _resolve_server_key, _server_key
+from tools.lazurio_mcp_session_scope import profile_scoped
 
 if TYPE_CHECKING:  # pragma: no cover
     from tools.mcp_tool import MCPServerTask
@@ -376,9 +377,10 @@ def _register_candidates(name: str, candidates: list[_Candidate], *, check_fn: C
                 logger.warning("MCP server '%s': %s (→ '%s') collides with built-in tool in toolset '%s' — skipping to "
                                "preserve built-in", name, c.origin, c.registry_name, existing_toolset)
             continue
+        # Lazurio: a configured server's tool runs against the profile's connection (lazurio_mcp_session_scope).
         registry.register(
-            name=c.registry_name, toolset=toolset_name, schema=c.schema, handler=c.handler, check_fn=check_fn,
-            is_async=False, description=c.schema.get("description") or "", scope=scope_value,
+            name=c.registry_name, toolset=toolset_name, schema=c.schema, handler=profile_scoped(name, c.handler),
+            check_fn=check_fn, is_async=False, description=c.schema.get("description") or "", scope=scope_value,
             execution_timeout=execution_timeout)
         if registry.get_toolset_for_tool(c.registry_name) == toolset_name:
             _track_mcp_tool_server(c.registry_name, name)

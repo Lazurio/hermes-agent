@@ -25,6 +25,8 @@ test and release it, and these changes to Hermes' ACP server (`hermes acp`):
 - **Silence stays silent.** When Buddy has nothing new to say and answers with Hermes' silence
   marker (`NO_REPLY`), the chat shows nothing, as Telegram does: neither the marker nor Hermes'
   warning about it.
+- **Buddy's memory in the chat.** The MCP servers in Hermes' configuration, such as Buddy's memory,
+  work in the chat too, beside the server Lazurio T3 Code passes, as they do on Telegram.
 
 Every change Lazurio makes to Hermes is listed in the runbook's overlay table, with why Lazurio
 needs it and what upstream has to ship before it goes away.
