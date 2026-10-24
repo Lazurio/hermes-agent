@@ -814,8 +814,6 @@ class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfi
         if status in ("queued", "unknown") or {admission_id} & (
                 self._terminals.keys() | self._settling | self._receipted.keys()):
             return
-        # Lazurio: text held back as a possible silence marker was never shown; the completion owes it.
-        self._lazurio_held().pop(admission_id, None)
         self._cut.setdefault(admission_id, self._streamed.pop(admission_id, ""))
         if status:
             return
@@ -967,10 +965,10 @@ class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfi
         if kind in {"session.info", "session.updated", "session.usage", "session.tools_changed"}:
             await self._project_session_state(kind, sid, editor_id, payload, event)
             return
+        # Lazurio: what a segment held back as a possible silence marker is shown before its boundary.
+        await self._lazurio_segment_boundary(kind, sid, editor_id, aid, payload)
         if await self._gap_guard(kind, sid, aid):
             return
-        # Lazurio: what a segment held back as a possible silence marker is shown before its boundary.
-        await self._lazurio_show_held(kind, sid, editor_id, aid)
         if kind in {"approval.request", "clarify.request"}:
             self._permission(sid, payload)
             return
