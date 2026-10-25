@@ -31,6 +31,13 @@ test and release it, and these changes to Hermes' ACP server (`hermes acp`):
   `LAZURIO_BUDDY_CHANNEL`, and only those turns: a bot task given in the chat reports back there,
   while one given on Telegram or by another editor reports on Telegram.
 
+And one change to the sign-in of Hermes' dashboard API, through which Lazurio signs Buddy in to
+ChatGPT:
+
+- **An abandoned sign-in stays abandoned.** Once Hermes has dropped a sign-in that ran past its 15
+  minutes, the login still running in the background can no longer save the account, so a sign-out
+  or another sign-in made after that stays as it is.
+
 Every change Lazurio makes to Hermes is listed in the runbook's overlay table, with why Lazurio
 needs it and what upstream has to ship before it goes away.
 

@@ -130,6 +130,11 @@ jobs:
             gateway/session_operator.py
             tools/environments/base_session_env.py
             tui_gateway/contracts/canonical_sessions.py
+            # oauth: a sign-in the 15-minute sweep removes can no longer save its tokens:
+            # _gc_oauth_sessions marks a still-pending session cancelled before it removes it, under
+            # the lock every poller's final check-and-save holds, and _drop_oauth_session marks the
+            # session it forgets.
+            hermes_cli/web_routers/oauth.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
           # deletion plus a new file) or changing its type always fails, allowlisted or not.
@@ -206,9 +211,12 @@ jobs:
           # resume refresh, the runtime descriptor), upstream's tests of the MCP registration,
           # availability and call seams the configured-MCP row touches (session scopes, trust, lazy
           # start, multiplexed connection keys, the schema cache, the registry's checked tool list and
-          # the Tool Search catalog built from it), and upstream's tests of the seams the channel row
+          # the Tool Search catalog built from it), upstream's tests of the seams the channel row
           # touches (per-turn admission fields, a local session's claim and its turn, the session
-          # context and its env bridge, the bash snapshot, the generated wire contract).
+          # context and its env bridge, the bash snapshot, the generated wire contract), and upstream's
+          # tests of the dashboard sign-in seams the OAuth sweep row touches (the routes and pollers,
+          # the Codex worker, a dropped start, the free-tier sign-in and the setup metric a session
+          # settles).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
@@ -230,6 +238,11 @@ jobs:
             tests/gateway/test_session_policy_refusal_fields.py
             tests/gateway/test_session_resume_config_refresh.py
             tests/gateway/test_surface_admission.py
+            tests/hermes_cli/test_anon_desktop_signin.py
+            tests/hermes_cli/test_native_profile_scope_threads.py
+            tests/hermes_cli/test_shared_metrics_signals.py
+            tests/hermes_cli/test_web_oauth_dispatch.py
+            tests/hermes_cli/web_routers/test_codex_device_login_transient_retry.py
             tests/tools/test_local_env_session_leak.py
             tests/tools/test_mcp_lazy_start.py
             tests/tools/test_mcp_multiplex_connection_keys.py

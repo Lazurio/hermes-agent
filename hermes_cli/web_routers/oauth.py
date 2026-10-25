@@ -105,7 +105,9 @@ def _new_oauth_session(provider_id: str, flow: str, profile: Optional[str] = Non
 def _drop_oauth_session(sid: str) -> None:
     """Forget a session that never got started, so the dashboard does not poll a corpse forever."""
     with _oauth_sessions_lock:
-        _oauth_sessions.pop(sid, None)
+        sess = _oauth_sessions.pop(sid, None)
+        if sess is not None:  # Lazurio: cancelled as it is forgotten, as on every removal (_gc_oauth_sessions)
+            sess["cancelled"] = True
 
 
 def _start_poller(target, sid: str, prefix: str = "oauth-poll") -> None:
@@ -796,7 +798,12 @@ async def disconnect_oauth_provider(provider_id: str, request: Request, profile:
 def _gc_oauth_sessions() -> None:
     cutoff = time.time() - _OAUTH_SESSION_TTL_SECONDS
     with _oauth_sessions_lock:
-        for sid in [sid for sid, sess in _oauth_sessions.items() if sess["created_at"] < cutoff]:
+        for sid, sess in [(sid, sess) for sid, sess in _oauth_sessions.items() if sess["created_at"] < cutoff]:
+            # Lazurio: a sign-in still running is cancelled before it is forgotten, under the lock its
+            # poller's final check-and-save holds, as cancel_oauth_session() does: once poll and DELETE
+            # answer "not found", the worker can no longer save. A finished one keeps its status.
+            if sess.get("status") == "pending":
+                sess["cancelled"] = True
             _oauth_sessions.pop(sid, None)
 
 
