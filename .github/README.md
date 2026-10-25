@@ -14,9 +14,10 @@ Hermes Agent itself is unchanged apart from the Lazurio overlay: this README, th
 [release runbook](../docs/operations/lazurio-fork-release.md) and the `lazurio-*` workflows that
 test and release it, and these changes to Hermes' ACP server (`hermes acp`):
 
-- **Model and reasoning effort in the chat.** Sessions advertise the model and the reasoning effort
-  as ACP session config options, so Lazurio T3 Code shows a model picker and a reasoning effort
-  select; a change from any surface reaches the chat.
+- **Fast mode in the chat.** Sessions whose model offers Hermes' fast mode advertise it as an ACP
+  session config option, so Lazurio T3 Code shows a Normal or Fast choice; a change from any surface
+  reaches the chat. The chat offers no model and no reasoning effort: Lazurio sets both in Hermes'
+  configuration.
 - **Buddy can ask.** A chat whose editor answers ACP form elicitation (Lazurio T3 Code does) gets
   Hermes' `clarify` tool, so Buddy asks its user in the chat's question panel.
 - **Sending while Buddy works.** When the chat stops a running turn to send a new message, the

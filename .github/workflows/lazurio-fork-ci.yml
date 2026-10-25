@@ -68,9 +68,9 @@ jobs:
           # Changing the content of any other upstream file fails. The distribution row adds only
           # Lazurio files.
           allowed_upstream_changes=(
-            # acp: model and thought_level session config options on the gateway viewer. The viewer
-            # mixes in acp_adapter/lazurio_config_options.py: its session replies carry the options,
-            # set_config_option runs them and answers with the options last shown, and its snapshot
+            # acp: fast mode session config option on the gateway viewer. The viewer mixes in
+            # acp_adapter/lazurio_config_options.py: its session replies carry the option,
+            # set_config_option runs it and answers with the options last shown, and its snapshot
             # adoption, session.info projection and post-attach notices refresh them from the owner.
             # acp: clarify for an ACP editor that answers form elicitation (listed below too): the
             # viewer's session/new asks for it with editor.lazurio_form_elicitation when the owner
@@ -214,6 +214,8 @@ jobs:
           # The fixed gate: upstream's ACP adapter tests (the seams of the ACP overlay rows, with
           # upstream's real gateway and ACP stdio tests), upstream's check of every workflow's job
           # graph and triggers, which reads the lazurio-* workflows too, upstream's tests of the
+          # owner's session-scoped fast control the fast mode row runs and reads (config.set and
+          # config.get fast on a real gateway), upstream's tests of the
           # session policy seams the clarify row touches (creation, editor policy, follow-profile,
           # resume refresh, the runtime descriptor), upstream's tests of the MCP registration,
           # availability and call seams the configured-MCP row touches (session scopes, trust, lazy
@@ -253,6 +255,7 @@ jobs:
             tests/gateway/test_session_policy_coding_posture.py
             tests/gateway/test_session_policy_refusal_fields.py
             tests/gateway/test_session_resume_config_refresh.py
+            tests/gateway/test_session_tui_config.py
             tests/gateway/test_shutdown_runtime_ownership.py
             tests/gateway/test_shutdown_watchdog.py
             tests/gateway/test_status.py

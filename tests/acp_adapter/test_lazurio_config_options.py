@@ -1,11 +1,12 @@
-"""Lazurio overlay: model and reasoning effort as ACP session config options, against a fake owner.
+"""Lazurio overlay: the session's fast mode as the one ACP session config option, against a fake owner.
 
-Lazurio T3 Code reads its model list only from ``configOptions`` of category ``model`` and offers a
-``thought_level`` select in its composer; ``models`` and ``modes`` stay for Zed. Setting either
-option runs the owner's existing mutation; afterwards what the editor was shown follows the owner by
-reading it, so a change from any surface reaches the editor as ``config_option_update`` and an older
-event can never overwrite a newer answer. Overlay row: ``acp: model and thought_level session config
-options on the gateway viewer`` (docs/operations/lazurio-fork-release.md).
+Buddy's chat in Lazurio T3 Code offers Normal or Fast and no model or reasoning effort, which the
+Lazurio Platform sets in Hermes's config. A session whose route offers fast mode advertises one
+``fast`` select beside upstream's ``models`` and ``modes``; setting it runs the owner's
+session-scoped fast control (``config.set fast``, the TUI's ``/fast``); afterwards what the editor
+was shown follows the owner by reading it, so a change from any surface reaches the editor as
+``config_option_update`` and an older read can never overwrite a newer answer. Overlay row:
+``acp: fast mode session config option on the gateway viewer`` (docs/operations/lazurio-fork-release.md).
 """
 import asyncio
 from unittest.mock import AsyncMock
@@ -15,14 +16,12 @@ import pytest
 from acp.schema import ConfigOptionUpdate, ModelInfo, SessionModelState
 
 from acp_adapter.gateway_server import GatewayACPAgent
-from hermes_constants import VALID_REASONING_EFFORTS
+from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError
 
-LEVELS = ["none", *VALID_REASONING_EFFORTS]
-
-
-def _models(current="custom:m1"):
-    return SessionModelState(current_model_id=current, available_models=[
-        ModelInfo(model_id="custom:m1", name="m1"), ModelInfo(model_id="custom:m2", name="m2")])
+# Buddy's route: ChatGPT sign-in (openai-codex) on GPT-6.1 Sol, which offers fast mode.
+ROUTE = {"model": "gpt-6.1-sol", "provider": "openai-codex"}
+# A local model: no fast mode.
+LOCAL = {"model": "local-wire-stub", "provider": "custom"}
 
 
 def _agent(rpc, *, conn=True):
@@ -37,7 +36,11 @@ def _agent(rpc, *, conn=True):
 @pytest.fixture(autouse=True)
 def _picker(monkeypatch):
     from acp_adapter import gateway_session_meta
-    monkeypatch.setattr(gateway_session_meta, "model_state", lambda info: _models(f"custom:{info.get('model', 'm1')}"))
+
+    def picker(info):
+        choice = f"{info.get('provider')}:{info.get('model')}"
+        return SessionModelState(current_model_id=choice, available_models=[ModelInfo(model_id=choice, name="m")])
+    monkeypatch.setattr(gateway_session_meta, "model_state", picker)
     monkeypatch.setattr(gateway_session_meta, "provenance_meta", lambda *args: None)
 
 
@@ -45,9 +48,18 @@ def _options(options):
     return {option.id: option for option in options}
 
 
+def _fast(options):
+    return _options(options)["fast"].current_value
+
+
 def _updates(agent):
     return [call.kwargs["update"] for call in agent._conn.session_update.await_args_list
             if isinstance(call.kwargs["update"], ConfigOptionUpdate)]
+
+
+def _shown(agent):
+    """What every config_option_update told the editor: the fast value, or None for no option."""
+    return [_options(u.config_options)["fast"].current_value if u.config_options else None for u in _updates(agent)]
 
 
 async def _drain(agent):
@@ -60,281 +72,398 @@ async def _no_owner(method, **params):
     raise AssertionError(f"no owner call expected, got {method}")
 
 
-def _reads(truth):
-    """A fake owner whose ``session.info`` answers the current *truth* (a dict the test may change)."""
-    async def rpc(method, **params):
-        assert method == "session.info", method
-        return dict(truth)
-    return rpc
+def _attached(agent, info, tier=""):
+    """The session as its attach reply showed it, after the attach's own refresh."""
+    agent._lazurio_config_fields("s", {**info, "service_tier": tier})
+    agent._lazurio_states()["s"]["dirty"] = False
 
 
-@pytest.mark.asyncio
-async def test_a_session_reply_advertises_model_and_thought_level_beside_models_and_modes():
-    agent = _agent(_no_owner, conn=False)
-    fields = await agent._session_fields("s", {"model": "m1", "provider": "custom", "reasoning_effort": "high"}, "s")
-    assert fields["models"].current_model_id == "custom:m1"
-    assert fields["modes"].current_mode_id == "default"
-    options = _options(fields["config_options"])
-    assert list(options) == ["model", "thought_level"]
-    model, level = options["model"], options["thought_level"]
-    assert (model.type, model.category, model.current_value) == ("select", "model", "custom:m1")
-    assert [choice.value for choice in model.options] == ["custom:m1", "custom:m2"]
-    assert (level.type, level.category, level.current_value) == ("select", "thought_level", "high")
-    assert [choice.value for choice in level.options] == LEVELS
+class Owner:
+    """A fake owner: ``session.info`` answers the session's route (with the tier its agent last ran
+    with), ``config.get fast`` and ``config.set fast`` its next turn's tier, as
+    ``gateway/session_config.py`` and ``gateway/session_tui_config.py`` do, and ``session.mutate`` a
+    model pick. A route without fast mode refuses the fast tier; so does every route with
+    ``refuse_fast`` (one whose base URL ``session.info`` does not show)."""
 
+    def __init__(self, info=ROUTE, *, tier=None, refuse_fast=False):
+        self.info, self.tier, self.refuse_fast, self.calls = dict(info), tier, refuse_fast, []
 
-@pytest.mark.asyncio
-async def test_a_session_without_a_level_shows_upstreams_default_and_a_current_model_off_the_list():
-    from acp_adapter.lazurio_config_options import build_config_options
-    options = _options(build_config_options({"model": "m9", "provider": "custom"}, _models("custom:m9")))
-    assert options["thought_level"].current_value == "medium"
-    assert options["model"].current_value == "custom:m9"
-    assert options["model"].options[0].value == "custom:m9"
-    # No picker at all: the reasoning effort is still offered.
-    assert list(_options(build_config_options({}, None))) == ["thought_level"]
+    def word(self):
+        return {"priority": "fast", "ultrafast": "ultrafast"}.get(self.tier, "normal")
 
-
-def _owner(operation, before, after, *, fail_first_readback=False):
-    """A fake owner for one mutation: ``session.resume`` and ``session.info`` answer *before* until
-    the mutation lands, then *after*; ``fail_first_readback`` loses the first snapshot read after it."""
-    sent, state = [], {"committed": False, "lost": fail_first_readback}
-
-    async def rpc(method, **params):
+    async def rpc(self, method, **params):
+        self.calls.append((method, params))
         if method == "session.info":
-            return dict(after if state["committed"] else before)
+            return dict(self.info)
         if method == "session.resume":
-            if state["committed"] and state["lost"]:
-                state["lost"] = False
-                from hermes_cli.gateway_client import GatewayClientError
-                raise GatewayClientError("Gateway connection failed; no local fallback")
-            return {"revision": 3, "execution_generation": 7, "info": after if state["committed"] else before}
-        assert method == "session.mutate", method
-        sent.append((params["operation"], params["payload"], params["expected_generation"], params["request_id"]))
-        state["committed"] = True
-        return {"session_id": "s", "operation": operation, "revision": 4}
+            return {"revision": 3, "execution_generation": 7, "info": dict(self.info)}
+        if method == "config.get":
+            assert params == {"session_id": "s", "key": "fast"}, params
+            return {"value": self.word()}
+        if method == "config.set":
+            assert set(params) == {"session_id", "key", "value"} and params["key"] == "fast", params
+            tier = {"fast": "priority", "normal": None}[params["value"]]
+            from acp_adapter.lazurio_config_options import fast_offered
+            if tier and (self.refuse_fast or not fast_offered(self.info)):
+                raise GatewayRPCError("fast_unavailable")
+            self.tier = tier
+            return {"key": "fast", "value": self.word()}
+        assert method == "session.mutate" and params["operation"] == "model", (method, params)
+        self.info = {"model": params["payload"]["model"], "provider": params["payload"]["provider"]}
+        return {"session_id": "s", "operation": "model", "revision": 4}
 
-    return rpc, sent
+    def methods(self):
+        return [method for method, _ in self.calls]
 
 
 @pytest.mark.asyncio
-async def test_thought_level_runs_the_owners_reasoning_mutation_and_answers_the_new_options():
-    rpc, sent = _owner("reasoning", {"model": "m1", "provider": "custom", "reasoning_effort": "high"},
-                       {"model": "m1", "provider": "custom", "reasoning_effort": "xhigh"})
-    agent = _agent(rpc)
-    response = await agent.set_config_option("thought_level", "s", "xhigh")
-    assert [(op, payload, generation) for op, payload, generation, _ in sent] == [("reasoning", {"effort": "xhigh"}, 7)]
-    options = _options(response.config_options)
-    assert options["thought_level"].current_value == "xhigh"
-    assert options["model"].current_value == "custom:m1"
-    # The pick is not retained as a pending control once the answer was built, and the refresh that
-    # follows the answer finds nothing new to tell the editor.
-    assert not agent._mutations.pending
+async def test_a_session_reply_advertises_only_fast_beside_upstreams_models_and_modes():
+    agent = _agent(_no_owner, conn=False)
+    fields = await agent._session_fields("s", {**ROUTE, "service_tier": "", "reasoning_effort": "high"}, "s")
+    assert fields["models"].current_model_id == "openai-codex:gpt-6.1-sol"  # upstream's picker, for Zed
+    assert fields["modes"].current_mode_id == "default"
+    [fast] = fields["config_options"]  # no model and no thought_level option
+    assert (fast.type, fast.id, fast.name, fast.category, fast.current_value) == (
+        "select", "fast", "Fast mode", None, "normal")
+    assert [(choice.value, choice.name) for choice in fast.options] == [("normal", "Normal"), ("fast", "Fast")]
+
+
+@pytest.mark.parametrize("tier, value", [
+    ("", "normal"), (None, "normal"), ("priority", "fast"), ("ultrafast", "fast"), ("auto", "normal"),
+    ("cold", "normal"), ("fast", "fast"), ("normal", "normal")])
+def test_a_static_tier_shows_as_fast_and_anything_else_as_normal(tier, value):
+    """The owner's tiers (``session.info``) and its words for them (``config.get fast``)."""
+    from acp_adapter.lazurio_config_options import build_config_options, fast_value
+    assert fast_value(tier) == value
+    assert _fast(build_config_options({**ROUTE, "service_tier": tier}, fast_value(tier))) == value
+
+
+@pytest.mark.parametrize("info", [
+    ROUTE, {"model": "gpt-6.1-sol", "provider": "openai"}, {"model": "claude-opus-5-5", "provider": "anthropic"},
+    {"model": "gpt-6.1-sol"}])
+def test_fast_is_offered_where_the_route_offers_fast_mode(info):
+    from acp_adapter.lazurio_config_options import build_config_options
+    assert [option.id for option in build_config_options(info, "normal")] == ["fast"]
+
+
+@pytest.mark.parametrize("info", [
+    LOCAL, {"model": "gpt-6.1-sol", "provider": "openrouter"}, {"model": "gpt-6.1-sol", "provider": "custom"},
+    {"model": "gpt-5.3-codex", "provider": "openai-codex"}, {"provider": "openai-codex"}, {}])
+def test_fast_is_hidden_where_the_route_offers_no_fast_mode(info):
+    from acp_adapter.lazurio_config_options import build_config_options
+    assert build_config_options(info, "normal") == []
+
+
+@pytest.mark.asyncio
+async def test_a_session_on_a_route_without_fast_mode_advertises_no_options():
+    agent = _agent(_no_owner, conn=False)
+    fields = await agent._session_fields("s", {**LOCAL, "service_tier": ""}, "s")
+    assert fields["config_options"] == []
+    assert fields["models"].current_model_id == "custom:local-wire-stub" and fields["modes"] is not None
+
+
+@pytest.mark.asyncio
+async def test_fast_and_back_to_normal_run_the_owners_session_fast_control():
+    owner = Owner()
+    agent = _agent(owner.rpc)
+    _attached(agent, ROUTE)
+    response = await agent.set_config_option("fast", "s", "fast")
+    assert _fast(response.config_options) == "fast" and owner.tier == "priority"
+    response = await agent.set_config_option("fast", "s", "normal")
+    assert _fast(response.config_options) == "normal" and owner.tier is None
     await _drain(agent)
-    assert _updates(agent) == []
+    sets = [params for method, params in owner.calls if method == "config.set"]
+    assert sets == [{"session_id": "s", "key": "fast", "value": "fast"},
+                    {"session_id": "s", "key": "fast", "value": "normal"}]
+    # Session-scoped: no durable mutation, and the refreshes after the answers find nothing new.
+    assert "session.mutate" not in owner.methods() and _updates(agent) == []
+    assert _fast(agent._lazurio_shown_options("s")) == "normal"
 
 
 @pytest.mark.asyncio
-async def test_a_retry_after_a_lost_answer_replays_the_owners_receipt_instead_of_writing_twice():
-    """The owner committed the level, then the snapshot read for the answer was lost: the editor's
-    retry of the same pick must not send a second, newly fenced mutation."""
-    from hermes_cli.gateway_client import GatewayClientError
-    rpc, sent = _owner("reasoning", {"model": "m1", "provider": "custom"},
-                       {"model": "m1", "provider": "custom", "reasoning_effort": "low"}, fail_first_readback=True)
-    agent = _agent(rpc)
-    with pytest.raises(GatewayClientError):
-        await agent.set_config_option("thought_level", "s", "low")
-    response = await agent.set_config_option("thought_level", "s", "low")
-    assert len(sent) == 1, sent
-    assert _options(response.config_options)["thought_level"].current_value == "low"
-    assert not agent._mutations.pending
+async def test_a_set_retires_what_a_lost_submit_and_an_ambiguous_control_retained():
+    owner = Owner()
+    agent = _agent(owner.rpc)
+    _attached(agent, ROUTE)
+    agent._unacked["s"] = ("retry-key", "input-id", ("text", []))
+    agent._mutations.pending[("s", "model", '{"model": "m"}')] = {"params": {}}
+    await agent.set_config_option("fast", "s", "fast")
+    assert "s" not in agent._unacked and not agent._mutations.pending
     await _drain(agent)
 
 
 @pytest.mark.asyncio
-async def test_the_model_option_is_the_model_pick_with_its_provider():
-    rpc, sent = _owner("model", {"model": "m1", "provider": "custom"}, {"model": "m2", "provider": "custom"})
-    agent = _agent(rpc)
-    response = await agent.set_config_option("model", "s", "custom:m2")
-    assert [(op, payload) for op, payload, _, _ in sent] == [("model", {"model": "m2", "provider": "custom"})]
-    assert _options(response.config_options)["model"].current_value == "custom:m2"
-    await _drain(agent)
-    assert _updates(agent) == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("config_id, value", [("thought_level", "turbo"), ("thought_level", ""), ("model", " ")])
-async def test_an_invalid_value_is_refused_before_the_owner(config_id, value):
+@pytest.mark.parametrize("value", ["ultrafast", "on", "toggle", "priority", "Fast", "", None])
+async def test_a_value_other_than_normal_or_fast_is_refused_before_the_owner(value):
     agent = _agent(_no_owner)
+    _attached(agent, ROUTE)
     with pytest.raises(acp.RequestError) as refused:
-        await agent.set_config_option(config_id, "s", value)
+        await agent.set_config_option("fast", "s", value)
     assert refused.value.code == -32602
 
 
 @pytest.mark.asyncio
-async def test_another_surfaces_change_reaches_the_editor_as_config_option_update():
-    truth = {"model": "m1", "provider": "custom", "reasoning_effort": "high"}
-    agent = _agent(_reads(truth))
-    agent._lazurio_config_fields("s", dict(truth), _models())
-
-    truth["reasoning_effort"] = "low"
-    await agent._project({"session_id": "s", "type": "session.info", "payload": {"reasoning_effort": "low"}})
+async def test_the_owners_refusal_where_the_route_has_no_fast_mode_reaches_the_editor():
+    """``session.info`` shows no base URL: a first-party provider behind another endpoint passes the
+    viewer's check, and the owner, which sees the base URL, refuses fast there."""
+    owner = Owner(refuse_fast=True)
+    agent = _agent(owner.rpc)
+    _attached(agent, ROUTE)
+    with pytest.raises(GatewayRPCError, match="fast_unavailable"):
+        await agent.set_config_option("fast", "s", "fast")
     await _drain(agent)
-    updates = _updates(agent)
-    assert len(updates) == 1 and updates[0].session_update == "config_option_update", updates
-    assert _options(updates[0].config_options)["thought_level"].current_value == "low"
+    assert owner.tier is None and _fast(agent._lazurio_shown_options("s")) == "normal"
+    assert _updates(agent) == []
+    # Normal is never refused.
+    assert _fast((await agent.set_config_option("fast", "s", "normal")).config_options) == "normal"
+    await _drain(agent)
 
-    # The same level again, or a session.info without model or level (a title, pending rows): nothing.
-    await agent._project({"session_id": "s", "type": "session.info", "payload": {"reasoning_effort": "low"}})
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config_id, value", [
+    ("model", "openai-codex:gpt-6-luna"), ("thought_level", "high"), ("thought_level", "turbo"), ("theme", "dark")])
+async def test_the_model_and_the_reasoning_effort_answer_like_any_unknown_config_id(config_id, value):
+    """No model pick and no reasoning mutation: nothing reaches the owner, and the answer is the
+    options the editor was last shown."""
+    agent = _agent(_no_owner)
+    # Nothing shown yet: upstream's empty answer.
+    assert (await agent.set_config_option(config_id, "s", value)).config_options == []
+    _attached(agent, ROUTE)
+    shown = (await agent.set_config_option(config_id, "s", value)).config_options
+    assert [option.id for option in shown] == ["fast"]
+    await _drain(agent)
+
+
+@pytest.mark.asyncio
+async def test_another_surfaces_change_reaches_the_editor_as_config_option_update():
+    owner = Owner()
+    agent = _agent(owner.rpc)
+    _attached(agent, ROUTE)
+
+    # Another surface pins fast (the TUI's /fast): the owner publishes no event, and its session.info
+    # still reports the tier the agent last ran with, so nothing is read yet.
+    owner.tier = "priority"
+    await agent._project({"session_id": "s", "type": "session.info", "payload": {**ROUTE, "service_tier": ""}})
+    await _drain(agent)
+    assert owner.calls == [] and _updates(agent) == []
+
+    # The next turn runs with it, and its session.info tells: the editor is told.
+    owner.info["service_tier"] = "priority"
+    await agent._project({"session_id": "s", "type": "session.info", "payload": {**ROUTE, "service_tier": "priority"}})
+    await _drain(agent)
+    assert _shown(agent) == ["fast"]
+
+    # The same tier again, or a session.info without route or tier (a title, pending rows): nothing.
+    reads = len(owner.calls)
+    await agent._project({"session_id": "s", "type": "session.info", "payload": {"service_tier": "priority"}})
     await agent._project({"session_id": "s", "type": "session.info", "payload": {"title": "Plans"}})
     await _drain(agent)
-    assert len(_updates(agent)) == 1
+    assert len(owner.calls) == reads and _shown(agent) == ["fast"]
 
-    # A model switch elsewhere rebuilds the picker for the new model.
-    truth.update(model="m2")
-    await agent._project({"session_id": "s", "type": "session.info", "payload": {"model": "m2", "provider": "custom"}})
+    # A model pick elsewhere onto a route without fast mode hides the option; back again shows it.
+    owner.info = dict(LOCAL)
+    await agent._project({"session_id": "s", "type": "session.info", "payload": dict(LOCAL)})
     await _drain(agent)
-    updates = _updates(agent)
-    assert len(updates) == 2
-    assert _options(updates[-1].config_options)["model"].current_value == "custom:m2"
-    assert _options(updates[-1].config_options)["thought_level"].current_value == "low"
+    owner.info = dict(ROUTE)
+    await agent._project({"session_id": "s", "type": "session.info", "payload": dict(ROUTE)})
+    await _drain(agent)
+    assert _shown(agent) == ["fast", None, "fast"]
+
+
+@pytest.mark.asyncio
+async def test_another_surfaces_return_to_normal_reaches_the_editor_with_the_next_session_info():
+    """The editor shows fast; another surface pins normal. The next session.info that reports a tier
+    other than fast asks for a refresh: a turn that ran normal, or a mutation's session.info of a
+    session whose agent is not built yet, which reports the profile's tier."""
+    owner = Owner(tier="priority")
+    agent = _agent(owner.rpc)
+    _attached(agent, ROUTE, tier="priority")
+    owner.tier = None
+    await agent._project({"session_id": "s", "type": "session.info", "payload": {**ROUTE, "service_tier": ""}})
+    await _drain(agent)
+    assert _shown(agent) == ["normal"]
 
 
 @pytest.mark.asyncio
 async def test_a_change_published_while_the_reply_is_built_reaches_the_editor_after_the_reply():
-    """The owner publishes a new model while the attach reply is being built, before the session has
-    state to project it onto: the reply shows the old model, and the refresh at the end of the
-    post-attach notices tells the editor the new one."""
-    agent = _agent(_reads({"model": "m2", "provider": "custom", "reasoning_effort": "high"}))
+    """The attach reply shows the tier the session's agent last ran with; a pin made since (or a
+    change published while the reply is built, before the session has state to project it onto) is
+    told by the refresh at the end of the post-attach notices."""
+    owner = Owner(tier="priority")
+    agent = _agent(owner.rpc)
     agent._after_attach = AsyncMock()  # the reply's post-attach notices run below, after the reply
-    await agent._project({"session_id": "s", "type": "session.info", "payload": {"model": "m2", "provider": "custom"}})
-    fields = await agent._session_fields("s", {"model": "m1", "provider": "custom", "reasoning_effort": "high"}, "s")
-    assert _options(fields["config_options"])["model"].current_value == "custom:m1"
+    await agent._project({"session_id": "s", "type": "session.info", "payload": {**ROUTE, "service_tier": "priority"}})
+    fields = await agent._session_fields("s", {**ROUTE, "service_tier": ""}, "s")
+    assert _fast(fields["config_options"]) == "normal"
     await agent._lazurio_reconcile("s")
-    assert [_options(u.config_options)["model"].current_value for u in _updates(agent)] == ["custom:m2"]
+    assert _shown(agent) == ["fast"]
 
 
 @pytest.mark.asyncio
-async def test_an_older_event_never_overwrites_a_newer_answer():
-    """Pablo's interleaving: an owner event for m2 asks for a refresh whose read is still out when this
-    editor's own pick of m3 commits and is answered from the owner's newer snapshot. The older read
-    lands first (the editor briefly sees m2), the adopted m3 snapshot asks for another read, which
-    tells the editor m3, the answer shows m3, and a late copy of the m2 event changes nothing: the
-    editor ends on the owner's m3."""
-    truth = {"model": "m1", "provider": "custom", "reasoning_effort": "high"}
-    sent, held, release = [], asyncio.Event(), asyncio.Event()
+async def test_an_older_read_never_overwrites_a_newer_answer():
+    """A session.info of a turn that ran fast asks for a refresh whose read is still out when this
+    editor's own set of normal commits and is answered. The older read lands first (the editor
+    briefly sees fast), the answer shows normal, the refresh after it finds nothing new, and a late
+    copy of the older event changes nothing: the editor ends on the owner's normal."""
+    owner = Owner(tier="priority")
+    held, release = asyncio.Event(), asyncio.Event()
+    plain = owner.rpc
 
     async def rpc(method, **params):
-        if method == "session.info":
-            seen = dict(truth)  # what the owner holds when the read arrives
-            if not held.is_set():
-                held.set()
-                await release.wait()
+        if method == "config.get" and not held.is_set():
+            seen = await plain(method, **params)  # what the owner holds when the read arrives
+            held.set()
+            await release.wait()
             return seen
-        if method == "session.resume":
-            return {"revision": 3, "execution_generation": 7, "info": dict(truth)}
-        assert method == "session.mutate", method
-        sent.append(params["payload"])
-        truth.update(model=params["payload"]["model"])
-        return {"session_id": "s", "operation": "model", "revision": 4}
+        return await plain(method, **params)
 
     agent = _agent(rpc)
-    agent._lazurio_config_fields("s", dict(truth), _models())
-    truth.update(model="m2")
-    await agent._project({"session_id": "s", "type": "session.info", "payload": {"model": "m2", "provider": "custom"}})
-    await asyncio.wait_for(held.wait(), 5)  # the refresh's read of m2 is out
+    _attached(agent, ROUTE)
+    await agent._project({"session_id": "s", "type": "session.info", "payload": {**ROUTE, "service_tier": "priority"}})
+    await asyncio.wait_for(held.wait(), 5)  # the refresh's read of fast is out
 
-    pick = asyncio.create_task(agent.set_config_option("model", "s", "custom:m3"))
-    while not sent:
+    pick = asyncio.create_task(agent.set_config_option("fast", "s", "normal"))
+    while owner.tier is not None:
         await asyncio.sleep(0)
     release.set()
     response = await asyncio.wait_for(pick, 5)
-    assert _options(response.config_options)["model"].current_value == "custom:m3"
-    await agent._project({"session_id": "s", "type": "session.info", "payload": {"model": "m2", "provider": "custom"}})
+    assert _fast(response.config_options) == "normal"
+    await agent._project({"session_id": "s", "type": "session.info", "payload": {**ROUTE, "service_tier": "priority"}})
     await _drain(agent)
-
-    shown = agent._lazurio_shown_options("s")
-    assert _options(shown)["model"].current_value == "custom:m3"
-    messages = [("update", _options(u.config_options)["model"].current_value) for u in _updates(agent)]
-    assert messages == [("update", "custom:m2"), ("update", "custom:m3")], messages  # never back to m2
+    assert _fast(agent._lazurio_shown_options("s")) == "normal"
+    assert _shown(agent) == ["fast"], _shown(agent)  # never told fast after the answer
 
 
 @pytest.mark.asyncio
-async def test_a_change_an_adopted_snapshot_covers_reaches_the_editor_without_its_event():
-    """A control that adopts the owner's fresh snapshot (upstream's ``session/set_model``, a typed
-    ``/model``) makes the pump skip the events at or below that snapshot's watermark, including the
-    owner's ``session.info`` for the change: the adoption itself asks for the refresh."""
-    rpc, sent = _owner("model", {"model": "m1", "provider": "custom"}, {"model": "m2", "provider": "custom"})
-    agent = _agent(rpc)
-    agent._lazurio_config_fields("s", {"model": "m1", "provider": "custom"}, _models())
-    agent._lazurio_states()["s"]["dirty"] = False  # the attach's own refresh already ran
-    await agent.set_session_model(model_id="custom:m2", session_id="s")  # its session.info event never arrives
+async def test_a_route_change_an_adopted_snapshot_covers_reaches_the_editor_without_its_event():
+    """A control that adopts the owner's fresh snapshot (upstream's ``session/set_model``, kept for
+    Zed's model picker, or a typed ``/model``) makes the pump skip the events at or below that
+    snapshot's watermark, including the owner's session.info for the change: the adoption itself
+    asks for the refresh, which hides the option on a route without fast mode."""
+    owner = Owner()
+    agent = _agent(owner.rpc)
+    _attached(agent, ROUTE)
+    await agent.set_session_model(model_id="custom:local-wire-stub", session_id="s")  # its session.info never arrives
     await _drain(agent)
-    assert [(op, payload) for op, payload, _, _ in sent] == [("model", {"model": "m2", "provider": "custom"})]
-    assert [_options(u.config_options)["model"].current_value for u in _updates(agent)] == ["custom:m2"]
+    assert [params["payload"] for method, params in owner.calls if method == "session.mutate"] == [
+        {"model": "local-wire-stub", "provider": "custom"}]
+    assert _shown(agent) == [None]
 
 
-@pytest.mark.asyncio
-async def test_a_reconnect_tells_the_editor_what_changed_while_the_connection_was_lost():
-    """A change made while this viewer's connection was down is in the snapshot the reconnect adopts,
-    whose watermark makes the pump skip its event. The re-attach adopts before ``_client`` installs
-    the new connection, so the refresh waits for that and reads through it."""
-    truth = {"model": "m2", "provider": "custom", "reasoning_effort": "low"}
-    agent = _agent(_no_owner)
-    agent._lazurio_config_fields("s", {"model": "m1", "provider": "custom", "reasoning_effort": "high"}, _models())
-    agent._lazurio_states()["s"]["dirty"] = False  # the attach's own refresh already ran
-
+def _reconnecting(agent, owner):
+    """A replacement connection to *owner*, installed as ``_client`` does: re-attach first."""
     async def rpc(method, **params):
         if method == "session.resume":
             return {"revision": 5, "execution_generation": 7, "replay_epoch": "e2", "last_sequence": 9,
-                    "info": dict(truth), "prompts": []}
-        if method == "config.set":  # the re-attach asks for live reasoning again
+                    "info": dict(owner.info), "prompts": []}
+        if method == "config.set" and params.get("key") == "show_reasoning":  # the re-attach asks again
             return {}
-        assert method == "session.info", method
-        return dict(truth)
+        return await owner.rpc(method, **params)
 
     fresh = AsyncMock()
     fresh.rpc.side_effect = rpc
-    agent._gateway = None  # ``_teardown`` dropped the lost connection
-    async with agent._connect_lock:  # as ``_client`` does: re-attach first, then install the connection
-        await agent._reattach(fresh)
-        for _ in range(5):
-            await asyncio.sleep(0)  # the refresh the adoption asked for is waiting for the connection
-        agent._gateway = fresh
+
+    async def reconnect():
+        agent._gateway = None  # ``_teardown`` dropped the lost connection
+        async with agent._connect_lock:
+            await agent._reattach(fresh)
+            for _ in range(5):
+                await asyncio.sleep(0)  # a refresh the adoption asked for waits for the connection
+            agent._gateway = fresh
+        await _drain(agent)
+    return reconnect
+
+
+@pytest.mark.asyncio
+async def test_a_pin_an_owner_restart_dropped_reaches_the_editor_on_reconnect():
+    """The editor pinned fast and no turn ran since, so every session.info it read still reported
+    normal. The pin lives in the owner's memory: a restarted owner runs the session's own tier
+    again, and the re-attach's snapshot, unchanged since, still asks for the read because it reports
+    normal against the fast the editor was shown."""
+    owner = Owner(info={**ROUTE, "service_tier": ""})
+    agent = _agent(owner.rpc)
+    _attached(agent, ROUTE)
+    assert _fast((await agent.set_config_option("fast", "s", "fast")).config_options) == "fast"
     await _drain(agent)
-    shown = [(_options(u.config_options)["model"].current_value, _options(u.config_options)["thought_level"].current_value)
-             for u in _updates(agent)]
-    assert shown == [("custom:m2", "low")], shown
+    assert agent._lazurio_states()["s"]["info"]["service_tier"] == ""  # what the owner reported
+    owner.tier = None  # the restart
+    await _reconnecting(agent, owner)()
+    assert _shown(agent) == ["normal"]
 
 
-def _flaky_reads(truth, fail):
-    """A fake owner whose ``session.info`` fails while *fail* says so, then answers *truth*."""
+@pytest.mark.asyncio
+async def test_a_pin_whose_answer_never_came_reaches_the_editor():
+    """The owner pinned fast, but its answer did not come in time (the connection stays): the editor
+    gets the error, and the refresh after it tells the editor what the owner holds."""
+    owner = Owner()
+    agent = _agent(owner.rpc)
+    _attached(agent, ROUTE)
+
+    async def late(method, **params):
+        answer = await owner.rpc(method, **params)
+        if method == "config.set":
+            raise GatewayClientError("timeout")
+        return answer
+    agent._gateway.rpc.side_effect = late
+    with pytest.raises(GatewayClientError, match="timeout"):
+        await agent.set_config_option("fast", "s", "fast")
+    await _drain(agent)
+    assert owner.tier == "priority" and _shown(agent) == ["fast"]
+
+
+@pytest.mark.asyncio
+async def test_a_pin_whose_connection_was_lost_reaches_the_editor_as_another_surfaces_does():
+    """The owner pinned fast, then the connection went down with the answer. The reconnect reads only
+    when its snapshot differs from what the editor was shown (upstream's reconnect tests pin every
+    call on the new connection), and this one still reports the tier the agent last ran with; the
+    session.info of the next turn, which runs fast, tells the editor."""
+    owner = Owner()
+    agent = _agent(owner.rpc)
+    _attached(agent, ROUTE)
+
+    async def lost(method, **params):
+        await owner.rpc(method, **params)
+        agent._gateway = None  # the transport went down with the answer
+        raise GatewayClientError("Gateway connection failed; no local fallback")
+    agent._gateway.rpc.side_effect = lost
+    with pytest.raises(GatewayClientError):
+        await agent.set_config_option("fast", "s", "fast")
+    await _drain(agent)
+    assert owner.tier == "priority" and _updates(agent) == []
+    calls = len(owner.calls)
+    await _reconnecting(agent, owner)()
+    assert len(owner.calls) == calls and _updates(agent) == []  # nothing read through the new connection
+    owner.info["service_tier"] = "priority"
+    await agent._project({"session_id": "s", "type": "session.info", "payload": {**ROUTE, "service_tier": "priority"}})
+    await _drain(agent)
+    assert _shown(agent) == ["fast"]
+
+
+def _flaky(owner, fail):
+    """*owner*, whose reads fail while *fail* (the read's number) says so."""
     reads = []
 
     async def rpc(method, **params):
-        assert method == "session.info", method
-        reads.append(method)
-        if fail(len(reads)):
-            from hermes_cli.gateway_client import GatewayClientError
-            raise GatewayClientError("Gateway connection failed; no local fallback")
-        return dict(truth)
+        if method == "session.info":
+            reads.append(method)
+            if fail(len(reads)):
+                raise GatewayClientError("Gateway connection failed; no local fallback")
+        return await owner.rpc(method, **params)
     return rpc, reads
 
 
 @pytest.mark.asyncio
 async def test_a_failed_read_after_an_adopted_snapshot_is_retried_until_the_editor_follows(monkeypatch):
-    """Pablo's third case: the adopted snapshot carries another surface's m2 (its event is under the
-    snapshot's watermark), and the refresh's first owner read fails once. The request stays and is
-    retried on the same connection, so the editor ends on m2."""
+    """The adopted snapshot carries another surface's model pick onto a route without fast mode (its
+    event is under the snapshot's watermark), and the refresh's first owner read fails once. The
+    request stays and is retried on the same connection, so the option goes."""
     monkeypatch.setattr(GatewayACPAgent, "_LAZURIO_RETRY_DELAYS", (0, 0, 0))
-    rpc, reads = _flaky_reads({"model": "m2", "provider": "custom"}, lambda n: n == 1)
+    rpc, reads = _flaky(Owner(LOCAL), lambda n: n == 1)
     agent = _agent(rpc)
-    agent._lazurio_config_fields("s", {"model": "m1", "provider": "custom"}, _models())
-    agent._lazurio_states()["s"]["dirty"] = False  # the attach's own refresh already ran
-    await agent._adopt("s", {"execution_generation": 7, "replay_epoch": "e", "last_sequence": 2,
-                             "info": {"model": "m2", "provider": "custom"}})
+    _attached(agent, ROUTE)
+    await agent._adopt("s", {"execution_generation": 7, "replay_epoch": "e", "last_sequence": 2, "info": dict(LOCAL)})
     await _drain(agent)
-    assert len(reads) == 2
-    assert [_options(u.config_options)["model"].current_value for u in _updates(agent)] == ["custom:m2"]
+    assert len(reads) == 2 and _shown(agent) == [None]
     assert agent._lazurio_states()["s"]["dirty"] is False
 
 
@@ -342,28 +471,30 @@ async def test_a_failed_read_after_an_adopted_snapshot_is_retried_until_the_edit
 async def test_retries_are_bounded_and_the_next_change_reads_again(monkeypatch):
     monkeypatch.setattr(GatewayACPAgent, "_LAZURIO_RETRY_DELAYS", (0, 0, 0))
     failing = {"on": True}
-    rpc, reads = _flaky_reads({"model": "m2", "provider": "custom"}, lambda n: failing["on"])
+    rpc, reads = _flaky(Owner(tier="priority"), lambda n: failing["on"])
     agent = _agent(rpc)
-    agent._lazurio_config_fields("s", {"model": "m1", "provider": "custom"}, _models())
+    agent._lazurio_config_fields("s", {**ROUTE, "service_tier": ""})
     await agent._lazurio_reconcile("s")
     await _drain(agent)
     assert len(reads) == 4 and _updates(agent) == []  # the read and three retries, then it waits
     assert agent._lazurio_states()["s"]["dirty"] is True  # the request stays
     failing["on"] = False
-    await agent._project({"session_id": "s", "type": "session.info", "payload": {"model": "m2", "provider": "custom"}})
+    await agent._project({"session_id": "s", "type": "session.info", "payload": {"title": "Plans"}})
     await _drain(agent)
-    assert len(reads) == 5
-    assert [_options(u.config_options)["model"].current_value for u in _updates(agent)] == ["custom:m2"]
+    assert len(reads) == 4  # a session.info without route or tier asks for nothing
+    await agent._project({"session_id": "s", "type": "session.info", "payload": {"service_tier": "priority"}})
+    await _drain(agent)
+    assert len(reads) == 5 and _shown(agent) == ["fast"]
 
 
 @pytest.mark.asyncio
 async def test_a_retry_never_reads_through_another_connection(monkeypatch):
     """A read that failed with its connection is not retried through a reconnect's new connection:
-    the reconnect's own adoption decides (upstream's reconnect tests pin every call there)."""
+    the reconnect's own adoption serves it (upstream's reconnect tests pin every call there)."""
     monkeypatch.setattr(GatewayACPAgent, "_LAZURIO_RETRY_DELAYS", (0.05, 0.05, 0.05))
-    rpc, reads = _flaky_reads({"model": "m2", "provider": "custom"}, lambda n: True)
+    rpc, reads = _flaky(Owner(), lambda n: True)
     agent = _agent(rpc)
-    agent._lazurio_config_fields("s", {"model": "m1", "provider": "custom"}, _models())
+    agent._lazurio_config_fields("s", {**ROUTE, "service_tier": ""})
     await agent._lazurio_reconcile("s")
     replacement = AsyncMock()
     replacement.rpc.side_effect = _no_owner
@@ -373,51 +504,35 @@ async def test_a_retry_never_reads_through_another_connection(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_refresh_is_quiet_when_nothing_changed():
-    reads = []
-
-    async def rpc(method, **params):
-        reads.append(method)
-        return {"model": "m1", "provider": "custom", "reasoning_effort": "high"}
-
-    agent = _agent(rpc)
-    agent._lazurio_config_fields("s", {"model": "m1", "provider": "custom", "reasoning_effort": "high"}, _models())
+async def test_a_refresh_reads_the_route_and_the_tier_and_is_quiet_when_nothing_changed():
+    owner = Owner()
+    agent = _agent(owner.rpc)
+    agent._lazurio_config_fields("s", {**ROUTE, "service_tier": ""})
     await agent._lazurio_reconcile("s")
-    assert reads == ["session.info"] and _updates(agent) == []
+    assert owner.methods() == ["session.info", "config.get"] and _updates(agent) == []
 
 
 @pytest.mark.asyncio
 async def test_the_refresh_is_the_last_post_attach_notice_and_never_reconnects():
-    calls = []
+    owner = Owner()
 
     async def rpc(method, **params):
-        calls.append(method)
-        return {"input_tokens": 0} if method == "session.stats" else {"model": "m1", "provider": "custom"}
+        return {"input_tokens": 0} if method == "session.stats" else await owner.rpc(method, **params)
 
     agent = _agent(rpc)
-    agent._lazurio_config_fields("s", {"model": "m1", "provider": "custom"}, _models())
+    agent._lazurio_config_fields("s", {**ROUTE, "service_tier": ""})
     await agent._after_attach("s", "s")
-    assert calls == ["session.stats", "session.info"]
+    assert owner.methods() == ["session.info", "config.get"]
     # Without a live connection (aclose, a lost transport) it opens none.
-    agent._lazurio_config_fields("s", {"model": "m1", "provider": "custom"}, _models())
+    agent._lazurio_config_fields("s", {**ROUTE, "service_tier": ""})
     agent._gateway = None
     await agent._lazurio_reconcile("s")
-    assert calls == ["session.stats", "session.info"]
+    assert owner.methods() == ["session.info", "config.get"]
 
 
 @pytest.mark.asyncio
 async def test_a_session_this_editor_never_attached_gets_no_update():
     agent = _agent(_no_owner)
-    await agent._project({"session_id": "other", "type": "session.info", "payload": {"reasoning_effort": "low"}})
+    await agent._project({"session_id": "other", "type": "session.info", "payload": {"service_tier": "priority"}})
     await _drain(agent)
     assert _updates(agent) == []
-
-
-@pytest.mark.asyncio
-async def test_other_config_ids_keep_upstreams_answer_and_return_the_options_last_shown():
-    agent = _agent(_no_owner)
-    # Nothing shown yet: upstream's empty answer, and no call to the owner.
-    assert (await agent.set_config_option("theme", "s", "dark")).config_options == []
-    agent._lazurio_config_fields("s", {"model": "m1", "provider": "custom"}, _models())
-    shown = (await agent.set_config_option("theme", "s", "dark")).config_options
-    assert [option.id for option in shown] == ["model", "thought_level"]
