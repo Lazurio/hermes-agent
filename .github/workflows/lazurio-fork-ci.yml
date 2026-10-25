@@ -135,6 +135,13 @@ jobs:
             # the lock every poller's final check-and-save holds, and _drop_oauth_session marks the
             # session it forgets.
             hermes_cli/web_routers/oauth.py
+            # oauth: identify names the sign-in cancel contract, and a stopping gateway keeps it:
+            # publish_gateway_runtime_ready lists the CAPABILITY of gateway/lazurio_oauth_contract.py
+            # among the ready capabilities, and release_gateway_runtime_lock closes the reservations
+            # through its close_process_ownership, which first ends the dashboard sign-ins still
+            # pending and keeps the reservations while a save still runs.
+            gateway/run_runtime.py
+            gateway/status.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
           # deletion plus a new file) or changing its type always fails, allowlisted or not.
@@ -216,19 +223,28 @@ jobs:
           # context and its env bridge, the bash snapshot, the generated wire contract), and upstream's
           # tests of the dashboard sign-in seams the OAuth sweep row touches (the routes and pollers,
           # the Codex worker, a dropped start, the free-tier sign-in and the setup metric a session
-          # settles).
+          # settles), and upstream's tests of the runtime seams the identify row touches (the ready
+          # descriptor and the strict identify reader, and the runtime lock's release on every way
+          # out: the stop of a real gateway process, an early exit, the exit backstop and the shutdown
+          # watchdog).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
+            tests/gateway/test_bootstrap_early_exit_teardown.py
             tests/gateway/test_claim_reopen_off_loop.py
             tests/gateway/test_delegation_session_id_leak.py
             tests/gateway/test_display_admission.py
             tests/gateway/test_follow_profile_followups.py
+            tests/gateway/test_gateway_process_exit.py
             tests/gateway/test_kanban_finite_admission.py
             tests/gateway/test_local_context_ref_turn_text.py
             tests/gateway/test_local_turn_origin_execute_code_gate.py
             tests/gateway/test_local_viewer_events_submit.py
+            tests/gateway/test_normal_runtime_boot.py
+            tests/gateway/test_runtime_bootstrap_lifecycle.py
             tests/gateway/test_runtime_describe_skin.py
+            tests/gateway/test_runtime_ownership.py
+            tests/gateway/test_runtime_token_identity.py
             tests/gateway/test_session_context_inheritance.py
             tests/gateway/test_session_edit_policy.py
             tests/gateway/test_session_env.py
@@ -237,8 +253,13 @@ jobs:
             tests/gateway/test_session_policy_coding_posture.py
             tests/gateway/test_session_policy_refusal_fields.py
             tests/gateway/test_session_resume_config_refresh.py
+            tests/gateway/test_shutdown_runtime_ownership.py
+            tests/gateway/test_shutdown_watchdog.py
+            tests/gateway/test_status.py
             tests/gateway/test_surface_admission.py
             tests/hermes_cli/test_anon_desktop_signin.py
+            tests/hermes_cli/test_gateway_runtime.py
+            tests/hermes_cli/test_gateway_runtime_discovery.py
             tests/hermes_cli/test_native_profile_scope_threads.py
             tests/hermes_cli/test_shared_metrics_signals.py
             tests/hermes_cli/test_web_oauth_dispatch.py

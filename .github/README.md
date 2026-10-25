@@ -34,9 +34,10 @@ test and release it, and these changes to Hermes' ACP server (`hermes acp`):
 And one change to the sign-in of Hermes' dashboard API, through which Lazurio signs Buddy in to
 ChatGPT:
 
-- **An abandoned sign-in stays abandoned.** Once Hermes has dropped a sign-in that ran past its 15
-  minutes, the login still running in the background can no longer save the account, so a sign-out
-  or another sign-in made after that stays as it is.
+- **An abandoned sign-in stays abandoned.** Once Hermes has dropped a sign-in, because it ran past
+  its 15 minutes or because Hermes stopped or restarted, the login still running in the background
+  can no longer save the account, so a sign-out or another sign-in made after that stays as it is.
+  A running Hermes tells Lazurio that it keeps this promise.
 
 Every change Lazurio makes to Hermes is listed in the runbook's overlay table, with why Lazurio
 needs it and what upstream has to ship before it goes away.

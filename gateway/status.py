@@ -994,8 +994,8 @@ def acquire_gateway_runtime_lock() -> bool:
 
 def release_gateway_runtime_lock() -> None:
     """Release only this process's profile reservations, never their lock files."""
-    from gateway.runtime_ownership import process_ownership
-    process_ownership.close()
+    from gateway.lazurio_oauth_contract import close_process_ownership  # Lazurio: sign-ins end first
+    close_process_ownership()
     _clear_running_pid_cache()
 
 def owns_gateway_runtime_lock() -> bool:
