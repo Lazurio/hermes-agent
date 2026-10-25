@@ -1,19 +1,25 @@
-"""Lazurio overlay: the session's model and reasoning effort as ACP session config options.
+"""Lazurio overlay: the session's fast mode as the one ACP session config option.
 
-Lazurio T3 Code builds its model picker only from ``configOptions`` of category ``model`` and offers
-every other select, such as one of category ``thought_level``, in its composer. Upstream's gateway
-viewer advertises the model only through the unstable ``models`` field and answers
-``set_config_option`` without effect, so Buddy's chat showed one "Default" model and could not set
-the reasoning effort.
+Buddy's chat in Lazurio T3 Code offers one choice, Normal or Fast: Hermes's fast mode answers sooner
+and uses more of the subscription. It offers no model and no reasoning effort: the Lazurio Platform
+sets both in Hermes's own config and the chat never overrides them (the Organization Admin's
+decision of 2026-10-25). Upstream's gateway viewer advertises no session config options and answers
+``set_config_option`` without effect.
 
-Here both are config options beside ``models`` and ``modes`` (which stay, for Zed), and setting one
-runs the owner mutation of the matching upstream control: ``model`` the model pick of
-``set_session_model``, ``thought_level`` the session's ``/reasoning`` level. A change from any
-surface reaches the editor as ``config_option_update``.
+Here a session whose route offers fast mode advertises one select, ``fast`` (``normal`` or
+``fast``), beside upstream's ``models`` and ``modes``, which stay as upstream has them. It is offered
+by the check upstream's session-scoped ``/fast`` makes before it pins a tier (``_set_fast`` in
+``gateway/session_tui_config.py``: ``resolve_fast_mode_overrides`` on the session's model and route),
+and its value is the tier the session's next turn runs, the owner's ``config.get fast``: a static
+tier (fast, ultrafast) shows as ``fast``, anything else (normal, an ``auto`` or ``cold`` window) as
+``normal``. Setting it runs that same control, the TUI's ``/fast`` (``config.set fast``): scoped to
+the session, never written to config.yaml, and refused by the owner where the route has no fast
+mode. A change from any surface reaches the editor as ``config_option_update``, at the latest when
+the session's next turn ends.
 
-Overlay row ``acp: model and thought_level session config options on the gateway viewer``
-(docs/operations/lazurio-fork-release.md). Removal: when upstream's gateway ACP viewer advertises
-config options for the model and the reasoning effort and implements ``set_config_option`` for them.
+Overlay row ``acp: fast mode session config option on the gateway viewer``
+(docs/operations/lazurio-fork-release.md). Removal: when upstream's gateway ACP viewer advertises the
+session's fast mode as a session config option and implements ``set_config_option`` for it.
 """
 from __future__ import annotations
 
@@ -25,45 +31,40 @@ from acp.schema import ConfigOptionUpdate, SessionConfigOptionSelect, SessionCon
 
 logger = logging.getLogger(__name__)
 
-MODEL = "model"
-THOUGHT_LEVEL = "thought_level"
-# Upstream's own reasoning picker shows a session without a level as "medium (default)"
-# (``gateway.reasoning.level_default``), so the select names that level as the current one.
-DEFAULT_THOUGHT_LEVEL = "medium"
+FAST = "fast"
+NORMAL = "normal"
+VALUES = (NORMAL, FAST)
 
 
-def thought_level_values() -> tuple[str, ...]:
-    """The levels upstream's ``/reasoning`` picker offers: off, then its ladder."""
-    from hermes_constants import VALID_REASONING_EFFORTS
-    return ("none", *VALID_REASONING_EFFORTS)
+def fast_offered(info: dict) -> bool:
+    """Whether the session's route offers fast mode: the check ``_set_fast`` makes before it pins a
+    static tier, on the model and provider of the owner's ``session.info``. That carries no base URL,
+    so a first-party provider served from another endpoint shows the option and the owner, which
+    checks the session's base URL too, refuses fast there (``fast_unavailable``)."""
+    from hermes_cli.models import resolve_fast_mode_overrides
+    model = str(info.get("model") or "").strip()
+    return bool(model) and resolve_fast_mode_overrides(model, provider=info.get("provider") or None) is not None
 
 
-def current_thought_level(info: dict) -> str:
-    level = str(info.get("reasoning_effort") or "").strip().lower()
-    return level if level in thought_level_values() else DEFAULT_THOUGHT_LEVEL
+def fast_value(tier) -> str:
+    """The select's value for an owner tier (``session.info`` ``service_tier``) or the owner's word for
+    it (``config.get fast``): a static tier is fast mode on; normal and a bounded ``auto`` or ``cold``
+    window are ``normal``, as ``config.get fast`` reads them."""
+    from agent.fast_mode import STATIC_TIERS, parse_service_tier
+    return FAST if parse_service_tier(tier) in STATIC_TIERS else NORMAL
 
 
-def build_config_options(info: dict, models) -> list[SessionConfigOptionSelect]:
-    """The editor's config options for a session's ``session.info`` and its model picker (``models``,
-    a ``SessionModelState`` or None). Labels name levels as upstream does on the session's route,
-    e.g. "ultra (sends max on this route)"."""
-    from agent.reasoning_effort import effort_display_label
-    options = []
-    if models is not None and models.current_model_id:
-        choices = [SessionConfigSelectOption(value=model.model_id, name=model.name, description=model.description)
-                   for model in models.available_models]
-        if models.current_model_id not in {choice.value for choice in choices}:
-            choices.insert(0, SessionConfigSelectOption(value=models.current_model_id, name=models.current_model_id))
-        options.append(SessionConfigOptionSelect(type="select", id=MODEL, name="Model", category="model",
-                                                 current_value=models.current_model_id, options=choices))
-    route = (info.get("provider"), info.get("model"), info.get("api_mode"))
-    options.append(SessionConfigOptionSelect(
-        type="select", id=THOUGHT_LEVEL, name="Reasoning effort", category="thought_level",
-        description="How much the model reasons before it answers.",
-        current_value=current_thought_level(info),
-        options=[SessionConfigSelectOption(value=level, name=effort_display_label(level, *route))
-                 for level in thought_level_values()]))
-    return options
+def build_config_options(info: dict, value: str) -> list[SessionConfigOptionSelect]:
+    """The editor's config options for a session's ``session.info`` and its fast-mode value: the
+    ``fast`` select where the route offers fast mode, else none."""
+    if not fast_offered(info):
+        return []
+    return [SessionConfigOptionSelect(
+        type="select", id=FAST, name="Fast mode",
+        description="Fast mode answers sooner and uses more of the subscription.",
+        current_value=value,
+        options=[SessionConfigSelectOption(value=NORMAL, name="Normal"),
+                 SessionConfigSelectOption(value=FAST, name="Fast")])]
 
 
 def _shown(options) -> tuple:
@@ -75,36 +76,49 @@ class LazurioConfigOptionsMixin:
     ``set_config_option``, snapshot adoption (``_adopt``), ``session.info`` projection and
     post-attach notices call the hooks below.
 
-    What the editor was last shown follows the owner by reading it: an owner ``session.info`` or an
-    adopted snapshot whose model or level differs from what the editor was shown only asks for a
-    refresh, which reads the owner's current ``session.info`` and sends ``config_option_update`` when
-    it differs. Refreshes of a session run one at a time and repeat while another request arrived,
-    so the last answer the editor gets reflects the owner's latest read; no event payload is merged
-    after an await, so an older event can never overwrite a newer snapshot."""
+    What the editor was last shown follows the owner by reading it: a refresh reads the owner's
+    ``session.info`` (the route) and ``config.get fast`` (the tier) and sends ``config_option_update``
+    when the options differ. Refreshes of a session run one at a time and repeat while another
+    request arrived, so the last answer the editor gets reflects the owner's latest read; no event
+    payload is merged after an await, so an older event can never overwrite a newer answer.
 
-    _LAZURIO_KEYS = ("model", "provider", "reasoning_effort")
+    The owner publishes no event when a session's tier is pinned, and its ``session.info`` reports
+    the tier the session's agent last ran with. So an owner ``session.info`` or an adopted snapshot
+    asks for a refresh when its model or provider differs from the route the options were built
+    from, or its tier from the value the editor was shown: another surface's change reaches the
+    editor at once on an attach or this editor's own set, and otherwise at the latest with the
+    ``session.info`` that ends the session's next turn. A reconnect reads only when its snapshot
+    differs so (upstream's reconnect tests pin every call on the new connection)."""
+
+    _LAZURIO_ROUTE_KEYS = ("model", "provider")
     # A failed owner read is retried after these delays (seconds) on the same connection; after the
-    # last one the request stays until the next change, control, attach or reconnect asks again.
+    # last one the request stays until the next change, set, attach or reconnect asks again.
     _LAZURIO_RETRY_DELAYS = (0.5, 2.0, 8.0)
 
     def _lazurio_states(self) -> dict:
-        # Session -> {"info": the owner info the options were built from, "models": its picker,
-        # "options": the options the editor was last shown, "shown": their (id, value) pairs,
-        # "lock": serializes this session's refreshes and records, "dirty": a refresh is wanted,
-        # "failures": owner reads failed in a row}.
+        # Session -> {"info": the owner info the options were built from, "value": the fast-mode
+        # value last read or set, "options": the options the editor was last shown, "shown": their
+        # (id, value) pairs, "lock": serializes this session's refreshes and records, "dirty": a
+        # refresh is wanted, "failures": owner reads failed in a row}.
         return self.__dict__.setdefault("_lazurio_config_state", {})
 
-    def _lazurio_record(self, session_id, info, models) -> list[SessionConfigOptionSelect]:
-        options = build_config_options(info, models)
-        state = self._lazurio_states().setdefault(session_id, {"lock": asyncio.Lock(), "dirty": False})
-        state.update(info=dict(info), models=models, options=options, shown=_shown(options))
+    def _lazurio_state(self, session_id) -> dict:
+        return self._lazurio_states().setdefault(session_id, {
+            "info": {}, "value": None, "options": [], "shown": (), "lock": asyncio.Lock(), "dirty": False})
+
+    def _lazurio_record(self, session_id, info, value) -> list[SessionConfigOptionSelect]:
+        options = build_config_options(info, value)
+        self._lazurio_state(session_id).update(info=dict(info), value=value, options=options,
+                                               shown=_shown(options))
         return options
 
-    def _lazurio_config_fields(self, session_id, info, models) -> dict:
-        """``config_options`` for a new/load/resume/fork reply. The owner may publish a new model or
-        level while the reply is built, before this session has state to project it onto, so the
-        post-attach notices (``_after_attach``) end with a refresh (``_lazurio_reconcile``)."""
-        options = self._lazurio_record(session_id, info, models)
+    def _lazurio_config_fields(self, session_id, info) -> dict:
+        """``config_options`` for a new/load/resume/fork reply, valued by the tier of the attach's
+        ``session.info``. That is the tier the session's agent last ran with, not one pinned since,
+        and the owner may publish a change while the reply is built, before this session has state to
+        project it onto, so the post-attach notices (``_after_attach``) end with a refresh
+        (``_lazurio_reconcile``)."""
+        options = self._lazurio_record(session_id, info, fast_value(info.get("service_tier")))
         self._lazurio_states()[session_id]["dirty"] = True
         return {"config_options": options}
 
@@ -113,34 +127,27 @@ class LazurioConfigOptionsMixin:
         the options the editor was last shown, read without a call to the owner."""
         return list((self._lazurio_states().get(session_id) or {}).get("options") or [])
 
-    async def _lazurio_set_config_option(self, session_id, config_id, value):
-        """``model`` and ``thought_level``: the owner's mutation, then the session's options from the
-        owner's fresh snapshot. As ``set_session_model`` does, the prepared mutation is acknowledged
-        only once that snapshot is adopted: an editor retrying after a lost answer replays the owner's
-        receipt instead of writing again. A refresh follows the answer, so a change another surface
-        made meanwhile still reaches the editor."""
-        if not isinstance(value, str) or not value.strip():
-            raise acp.RequestError.invalid_params({"configId": config_id, "value": value})
-        if config_id == MODEL:
-            await self.set_session_model(model_id=value, session_id=session_id)  # adopts the fresh snapshot
-        else:
-            if value not in thought_level_values():
-                raise acp.RequestError.invalid_params({"configId": config_id, "value": value,
-                                                       "allowed": list(thought_level_values())})
-            client = await self._client()
-            payload = {"effort": value}
-            self._unacked.pop(session_id, None)  # a control between a lost submit and its repeat retires it
-            await self._mutations.apply(client, session_id, "reasoning", payload)
-            await self._adopt(session_id, await client.rpc("session.resume", session_id=session_id))
-            self._mutations.acknowledge(session_id, "reasoning", payload)
-        from acp_adapter.gateway_session_meta import model_state
-        info = dict((self._snapshots.get(session_id) or {}).get("info") or {})
-        models = await asyncio.to_thread(model_state, info)
-        state = self._lazurio_states().setdefault(session_id, {"lock": asyncio.Lock(), "dirty": False})
-        async with state["lock"]:
-            options = self._lazurio_record(session_id, info, models)
-        self._lazurio_request_refresh(session_id)
-        return options
+    async def _lazurio_set_config_option(self, session_id, value):
+        """``fast``: the owner's session-scoped fast control (``config.set fast``), then the session's
+        options with the tier the owner answered. Like the session's other controls, it retires what
+        a lost submit or an ambiguous control retained, so the editor's later repeat of those is new
+        work. The control writes no receipt: a retry after a lost answer pins the same tier again.
+        A refresh follows the answer or the failure, so a change another surface made meanwhile, or a
+        pin the owner made although its answer never came (a timeout), still reaches the editor; one
+        whose connection was lost with the answer reaches it as another surface's change does."""
+        if value not in VALUES:
+            raise acp.RequestError.invalid_params({"configId": FAST, "value": value, "allowed": list(VALUES)})
+        client = await self._client()
+        self._unacked.pop(session_id, None)  # a control between a lost submit and its repeat retires it
+        self._mutations.retire(session_id)
+        state = self._lazurio_state(session_id)
+        try:
+            result = await client.rpc("config.set", session_id=session_id, key=FAST, value=value)
+            async with state["lock"]:
+                info = state.get("info") or (self._snapshots.get(session_id) or {}).get("info") or {}
+                return self._lazurio_record(session_id, info, fast_value(result.get("value")))
+        finally:
+            self._lazurio_request_refresh(session_id)
 
     def _lazurio_request_refresh(self, session_id):
         state = self._lazurio_states().get(session_id)
@@ -159,15 +166,14 @@ class LazurioConfigOptionsMixin:
         await self._lazurio_refresh(session_id)
 
     async def _lazurio_refresh(self, session_id, after_connect=False):
-        """Read the owner's current model and level and send ``config_option_update`` when they
-        differ from what the editor was shown; repeat while a new request arrived during a round.
-        Uses the live connection only and never opens one: without one (``aclose``, a lost
-        transport) the request stays and the reconnect's own adoption decides whether to read. A
-        failed read keeps the request and is retried on its connection (``_lazurio_retry``)."""
+        """Read the owner's route and tier and send ``config_option_update`` when the options differ
+        from what the editor was shown; repeat while a new request arrived during a round. Uses the
+        live connection only and never opens one: without one (``aclose``, a lost transport) the
+        request stays and the reconnect's own adoption decides whether to read. A failed read keeps
+        the request and is retried on its connection (``_lazurio_retry``)."""
         state = self._lazurio_states().get(session_id)
         if state is None:
             return
-        from acp_adapter.gateway_session_meta import model_state
         if after_connect:
             async with self._connect_lock:  # until the reconnect in progress has installed its connection
                 pass
@@ -179,9 +185,7 @@ class LazurioConfigOptionsMixin:
                 state["dirty"] = False
                 try:
                     info = await client.rpc("session.info", session_id=session_id)
-                    models = state["models"]
-                    if any(info.get(key) != state["info"].get(key) for key in ("model", "provider")):
-                        models = await asyncio.to_thread(model_state, info)
+                    tier = (await client.rpc("config.get", session_id=session_id, key=FAST)).get("value")
                 except Exception:
                     # Boundary, as upstream's post-attach notices: a detached editor or a refused read
                     # is not a failure of the editor's own requests. The request stays.
@@ -191,7 +195,7 @@ class LazurioConfigOptionsMixin:
                     return
                 state["failures"] = 0
                 shown = state["shown"]
-                options = self._lazurio_record(session_id, info, models)
+                options = self._lazurio_record(session_id, info, fast_value(tier))
                 if _shown(options) != shown and self._conn:
                     await self._conn.session_update(session_id=self._editor_id(session_id),
                                                     update=ConfigOptionUpdate(session_update="config_option_update",
@@ -215,12 +219,15 @@ class LazurioConfigOptionsMixin:
         task.add_done_callback(self._background.discard)
 
     async def _lazurio_project_config(self, sid, editor_id, payload):
-        """An owner ``session.info`` or an adopted snapshot whose model or level differs from what the
-        editor was shown (another surface's pick, or this editor's own) asks for a refresh. Adoption
-        counts as upstream's ``_adopt`` says: the pump skips the events a snapshot covers, so a
-        change it carries (a slash command's or reconnect's fresh snapshot) is seen only here."""
+        """An owner ``session.info`` or an adopted snapshot asks for a refresh when its route differs
+        from the one the options were built from (another surface's model pick), or its tier from the
+        value the editor was shown (a pin another surface made, read once a turn ran with it, or one
+        an owner restart dropped). Adoption counts as upstream's ``_adopt`` says: the pump skips the
+        events a snapshot covers, so a change it carries (a slash command's or reconnect's fresh
+        snapshot) is seen only here."""
         state = self._lazurio_states().get(sid)
-        keys = [key for key in self._LAZURIO_KEYS if key in payload]
-        if state is None or not keys or all(payload[key] == state["info"].get(key) for key in keys):
+        if state is None:
             return
-        self._lazurio_request_refresh(sid)
+        if (any(payload[key] != state["info"].get(key) for key in self._LAZURIO_ROUTE_KEYS if key in payload)
+                or ("service_tier" in payload and fast_value(payload["service_tier"]) != state["value"])):
+            self._lazurio_request_refresh(sid)

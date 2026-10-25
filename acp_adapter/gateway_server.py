@@ -328,7 +328,7 @@ class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfi
         modes = session_modes({"edit_approval_policy": MODE_TO_EDIT_APPROVAL_POLICY[self._modes.setdefault(
             session_id, session_modes(info).current_mode_id)]})
         return {"models": models, "modes": modes, "field_meta": meta,
-                **self._lazurio_config_fields(session_id, info, models)}
+                **self._lazurio_config_fields(session_id, info)}
 
     async def _after_attach(self, session_id, editor_id):
         from acp_adapter.gateway_session_meta import available_commands_update
@@ -594,15 +594,15 @@ class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfi
     async def set_config_option(self, config_id, session_id, value=None, **kwargs):
         """Accepted so editors do not fail on their own config writes, as main did; only the edit
         approval policy has a meaning here, and it is the same owner setting the modes select.
-        Lazurio: ``model`` and ``thought_level`` are advertised options (``lazurio_config_options``),
-        and every answer carries the options the editor was last shown, which an editor adopts."""
+        Lazurio: ``fast`` is an advertised option (``lazurio_config_options``), and every answer
+        carries the options the editor was last shown, which an editor adopts."""
         from acp.schema import SetSessionConfigOptionResponse
-        from acp_adapter.lazurio_config_options import MODEL, THOUGHT_LEVEL
+        from acp_adapter.lazurio_config_options import FAST
         from acp_adapter.modes import EDIT_APPROVAL_POLICY_CONFIG_ID, EDIT_APPROVAL_POLICY_TO_MODE
         session_id = self._held_session(session_id)
-        if config_id in {MODEL, THOUGHT_LEVEL}:
+        if config_id == FAST:
             return SetSessionConfigOptionResponse(
-                config_options=await self._lazurio_set_config_option(session_id, config_id, value))
+                config_options=await self._lazurio_set_config_option(session_id, value))
         if config_id == EDIT_APPROVAL_POLICY_CONFIG_ID:
             if value not in EDIT_APPROVAL_POLICY_TO_MODE:
                 raise GatewayClientError("invalid_params")
