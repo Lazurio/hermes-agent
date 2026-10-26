@@ -15,6 +15,10 @@ this one reply, in the person's language and in the agent's own words:
   changed), so a change applies to the next Start without a restart. The read follows the profile
   scope the gateway binds around inbound handling (``_make_profile_message_handler``), where upstream's
   reply reads its language too, so a multiplexed profile's sender gets that profile's text.
+- A config.yaml that cannot be read or parsed sends upstream's reply. The loader then serves its
+  last-known-good settings (``FailedConfigRead``) for everything else, but this text is only as
+  current as the file: a reply from a file that no longer says it could carry words its writer
+  replaced.
 - The request is recorded exactly as upstream records it, and the reply to a sender who is
   rate-limited stays upstream's: only the text of the code's reply changes.
 - A ready gateway's ``identify`` lists ``CAPABILITY`` (``run_runtime.publish_gateway_runtime_ready``),
@@ -50,11 +54,17 @@ def configured_text(config: Any) -> str:
 
 def pairing_reply(code: str) -> Optional[str]:
     """The configured reply for ``code``, or None to send upstream's. Never raises: a config that
-    cannot be read sends upstream's reply."""
+    cannot be read or parsed sends upstream's reply."""
     try:
         from hermes_cli.config import load_config_readonly
+        from hermes_cli.config_read_errors import FailedConfigRead
 
-        text = configured_text(load_config_readonly())
+        config = load_config_readonly()
+        # The loader's fallback for a file it could not read or parse: its last-known-good
+        # settings stay for every other reader, never for this text.
+        if isinstance(config, FailedConfigRead):
+            return None
+        text = configured_text(config)
         if not text:
             return None
         from agent.i18n import t
