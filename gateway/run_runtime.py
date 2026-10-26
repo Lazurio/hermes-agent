@@ -575,10 +575,13 @@ def publish_gateway_runtime_ready(runner):
     descriptor = runner.session_runtime_descriptor
     if runner.session_api.task.done() or not runner._running or runner._draining:
         raise RuntimeError('gateway stopped before session API readiness')
-    # Lazurio: identify names the dashboard sign-in contract this overlay keeps.
+    # Lazurio: identify names the dashboard sign-in contract this overlay keeps, and the configured
+    # pairing reply it honours.
     from gateway.lazurio_oauth_contract import CAPABILITY as LAZURIO_OAUTH_CANCEL
+    from gateway.lazurio_pairing_message import CAPABILITY as LAZURIO_PAIRING_MESSAGE
     descriptor.update(state='ready', capabilities=[
-        'session-authority-v1', 'durable-admission-v1', 'event-replay-v1', LAZURIO_OAUTH_CANCEL])
+        'session-authority-v1', 'durable-admission-v1', 'event-replay-v1', LAZURIO_OAUTH_CANCEL,
+        LAZURIO_PAIRING_MESSAGE])
     from gateway.session_hosted_service import start_ready_hosted_services
     start_ready_hosted_services(runner)
 

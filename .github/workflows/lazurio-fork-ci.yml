@@ -140,8 +140,15 @@ jobs:
             # among the ready capabilities, and release_gateway_runtime_lock closes the reservations
             # through its close_process_ownership, which first ends the dashboard sign-ins still
             # pending and keeps the reservations while a save still runs.
+            # pairing: a configured text replaces the reply that gives an unknown sender its code
+            # (listed below too): publish_gateway_runtime_ready also lists the CAPABILITY of
+            # gateway/lazurio_pairing_message.py.
             gateway/run_runtime.py
             gateway/status.py
+            # pairing: a configured text replaces the reply that gives an unknown sender its code:
+            # _hm_offer_pairing_code sends the reply of gateway/lazurio_pairing_message.py where
+            # config.yaml sets one, and upstream's otherwise.
+            gateway/run_inbound.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
           # deletion plus a new file) or changing its type always fails, allowlisted or not.
@@ -228,7 +235,8 @@ jobs:
           # settles), and upstream's tests of the runtime seams the identify row touches (the ready
           # descriptor and the strict identify reader, and the runtime lock's release on every way
           # out: the stop of a real gateway process, an early exit, the exit backstop and the shutdown
-          # watchdog).
+          # watchdog), and upstream's tests of the reply seam the pairing row touches (the code's reply
+          # off the event loop and what an unknown sender is told).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
@@ -243,6 +251,7 @@ jobs:
             tests/gateway/test_local_turn_origin_execute_code_gate.py
             tests/gateway/test_local_viewer_events_submit.py
             tests/gateway/test_normal_runtime_boot.py
+            tests/gateway/test_pairing_reply_off_loop.py
             tests/gateway/test_runtime_bootstrap_lifecycle.py
             tests/gateway/test_runtime_describe_skin.py
             tests/gateway/test_runtime_ownership.py
@@ -260,6 +269,7 @@ jobs:
             tests/gateway/test_shutdown_watchdog.py
             tests/gateway/test_status.py
             tests/gateway/test_surface_admission.py
+            tests/gateway/test_unauthorized_sender_notices.py
             tests/hermes_cli/test_anon_desktop_signin.py
             tests/hermes_cli/test_gateway_runtime.py
             tests/hermes_cli/test_gateway_runtime_discovery.py
