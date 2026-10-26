@@ -91,7 +91,10 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             return
         adapter = self._delivery_adapter_for(source)
         if code:
-            reply = pairing_code_reply(platform_name, code, pairing_profile_arg(pairing_store))
+            # Lazurio: a configured text replaces the code's reply (gateway/lazurio_pairing_message.py).
+            from gateway.lazurio_pairing_message import pairing_reply as lazurio_pairing_reply
+            reply = lazurio_pairing_reply(code) or pairing_code_reply(
+                platform_name, code, pairing_profile_arg(pairing_store))
         else:
             reply = pairing_rate_limited_reply()
         if adapter:

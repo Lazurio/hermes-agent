@@ -240,5 +240,27 @@ class Workflows(unittest.TestCase):
         self.assertIn("docs/operations/lazurio-fork-release.md", README)
 
 
+class Overlay(unittest.TestCase):
+    def test_the_pairing_row_names_its_key_placeholders_capability_and_hooks(self):
+        """The pairing reply's row: the key and the capability the code names are the ones the runbook
+        documents, and its upstream hooks are allowlisted and call the Lazurio module."""
+        code = read("gateway/lazurio_pairing_message.py")
+        key = re.search(r'^CONFIG_KEY = "([a-z_]+)"$', code, re.MULTILINE)
+        capability = re.search(r'^CAPABILITY = "(lazurio-[a-z-]+-v\d+)"$', code, re.MULTILINE)
+        assert key and capability, "gateway/lazurio_pairing_message.py names its key and its capability"
+        subject = "pairing: a configured text replaces the reply that gives an unknown sender its code"
+        row = re.search(rf"^\| `{re.escape(subject)}` \|(.+)\|$", RUNBOOK, re.MULTILINE)
+        assert row, "the overlay table lists the pairing row"
+        for name in (key.group(1), capability.group(1), "{code}", "{validity}", "gateway/run_inbound.py",
+                     "tests/gateway/test_lazurio_pairing_message.py"):
+            self.assertIn(name, row.group(1))
+        self.assertIn("gateway/run_inbound.py", allowlist())
+        inbound = read("gateway/run_inbound.py")
+        self.assertIn("from gateway.lazurio_pairing_message import pairing_reply as lazurio_pairing_reply", inbound)
+        # The configured reply comes first; upstream's code reply stays the fallback.
+        self.assertIn("reply = lazurio_pairing_reply(code) or pairing_code_reply(", inbound)
+        self.assertIn("from gateway.lazurio_pairing_message import CAPABILITY", read("gateway/run_runtime.py"))
+
+
 if __name__ == "__main__":
     unittest.main()
