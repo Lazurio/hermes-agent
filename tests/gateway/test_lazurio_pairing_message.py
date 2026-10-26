@@ -113,6 +113,31 @@ def test_the_text_is_read_in_the_profile_scope_the_gateway_binds():
 
 
 @pytest.mark.asyncio
+async def test_a_config_that_no_longer_parses_sends_upstreams_reply_not_the_last_good_text():
+    """The loader serves the last-known-good settings for a file it cannot parse; this reply never
+    takes its text from them."""
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.config_read_errors import FailedConfigRead
+
+    _config(f"{CONFIG_KEY}: previous message\n")
+    assert pairing_reply("ABCD2345") == "previous message"
+    _config("gateway: [broken\n")
+    # Every other reader keeps the last-known-good settings, this text among them.
+    fallback = load_config_readonly()
+    assert isinstance(fallback, FailedConfigRead)
+    assert fallback.get(CONFIG_KEY) == "previous message"
+    assert pairing_reply("ABCD2345") is None
+    adapter = AsyncMock()
+    store = PairingStore()
+    await _runner(store, adapter)._hm_offer_pairing_code(_source("8181"))
+    assert "hermes pairing approve telegram" in _sent(adapter)
+    assert [entry["user_id"] for entry in store.list_pending("telegram")] == ["8181"]
+    # Fixed again: the configured text again.
+    _config(f"gateway:\n  {CONFIG_KEY}: fixed {{code}}\n")
+    assert pairing_reply("ABCD2345") == "fixed ABCD2345"
+
+
+@pytest.mark.asyncio
 async def test_a_config_that_cannot_be_read_sends_upstreams_reply(monkeypatch):
     import hermes_cli.config
 
