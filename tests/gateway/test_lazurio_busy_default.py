@@ -4,6 +4,7 @@ gateway/lazurio_busy_default.py; overlay row ``gateway: a message that arrives w
 steers his running turn by default``.
 """
 
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -76,22 +77,27 @@ def _runner() -> GatewayRunner:
     return runner
 
 
-@pytest.mark.asyncio
-async def test_a_text_that_arrives_while_buddy_works_steers_his_turn(home, tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS", "0")
+async def _follow_up(tmp_path, monkeypatch, *, profile_mode=None, message_type=MessageType.TEXT,
+                     started_ago=1.0):
+    """A Telegram follow-up while a routed profile's turn runs, ``started_ago`` seconds after it
+    started (upstream's default grace window, 3 s, untouched); returns the agent and the adapter."""
+    monkeypatch.delenv("HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS", raising=False)
     monkeypatch.setenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", "false")
     runner = _runner()
     # A routed profile whose config.yaml names no busy mode takes the gateway's.
     profile_home = tmp_path / "buddy"
     profile_home.mkdir()
-    (profile_home / "config.yaml").write_text("display:\n  tool_progress: off\n", encoding="utf-8")
+    display = "display:\n  tool_progress: off\n"
+    if profile_mode is not None:
+        display += f"  busy_input_mode: {profile_mode}\n"
+    (profile_home / "config.yaml").write_text(display, encoding="utf-8")
     assert await runner._start_one_profile_adapters("buddy", profile_home, {}) == 0
     adapter = _Adapter(PlatformConfig(enabled=True, token="test-token"), Platform.TELEGRAM)
     runner._profile_adapters["buddy"][Platform.TELEGRAM] = adapter
     runner._configure_profile_adapter(adapter, "buddy", Platform.TELEGRAM)
     event = MessageEvent(
         text="only the ACP changes",
-        message_type=MessageType.TEXT,
+        message_type=message_type,
         source=SessionSource(
             platform=Platform.TELEGRAM, chat_id="chat-1", chat_type="dm", user_id="user-1", profile="buddy",
         ),
@@ -102,10 +108,34 @@ async def test_a_text_that_arrives_while_buddy_works_steers_his_turn(home, tmp_p
     agent._active_children = []
     agent.steer.return_value = True
     runner._running_agents[session_key] = agent
+    runner._running_agents_ts[session_key] = time.time() - started_ago
 
     assert await runner._handle_message(event) is None
+    return agent, adapter, session_key
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("started_ago", [1.0, 30.0])  # inside upstream's 3 s grace window, and after it
+async def test_a_text_that_arrives_while_buddy_works_steers_his_turn(home, tmp_path, monkeypatch, started_ago):
+    agent, adapter, session_key = await _follow_up(tmp_path, monkeypatch, started_ago=started_ago)
 
     agent.interrupt.assert_not_called()
     agent.steer.assert_called_once()
     assert agent.steer.call_args.args[0].endswith("only the ACP changes")
     assert session_key not in adapter._pending_messages
+
+
+@pytest.mark.asyncio
+async def test_the_grace_window_still_holds_a_text_in_queue_mode(home, tmp_path, monkeypatch):
+    agent, _adapter, _key = await _follow_up(tmp_path, monkeypatch, profile_mode="queue")
+
+    agent.steer.assert_not_called()
+    agent.interrupt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_the_grace_window_still_holds_a_photo_in_steer_mode(home, tmp_path, monkeypatch):
+    agent, _adapter, _key = await _follow_up(tmp_path, monkeypatch, message_type=MessageType.PHOTO)
+
+    agent.steer.assert_not_called()
+    agent.interrupt.assert_not_called()
