@@ -157,6 +157,9 @@ jobs:
             # pairing: a configured text replaces the reply that gives an unknown sender its code:
             # _hm_offer_pairing_code sends the reply of gateway/lazurio_pairing_message.py where
             # config.yaml sets one, and upstream's otherwise.
+            # gateway: a message that arrives while Buddy works steers his running turn by default
+            # (listed below too): _hm_busy_telegram_grace_queue asks grace_holds of
+            # gateway/lazurio_busy_default.py, so a steer-mode text skips the post-start grace window.
             gateway/run_inbound.py
             # oauth: whether the signed-in ChatGPT account may run the configured model: inside
             # reads_only() of hermes_cli/lazurio_auth_store_reads.py, _load_auth_store reads a store it

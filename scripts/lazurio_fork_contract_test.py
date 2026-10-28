@@ -319,6 +319,12 @@ class Overlay(unittest.TestCase):
         loaders = read("gateway/run_config_loaders.py")
         self.assertIn("from gateway.lazurio_busy_default import BUSY_INPUT_DEFAULT", loaders)
         self.assertIn("return mode if mode in _BUSY_INPUT_MODES else BUSY_INPUT_DEFAULT", loaders)
+        # The Telegram grace window never holds a steer-mode text (Pablo's review of #22).
+        self.assertIn("gateway/run_inbound.py", row.group(1))
+        self.assertIn("gateway/run_inbound.py", allowlist())
+        inbound = read("gateway/run_inbound.py")
+        self.assertIn("from gateway.lazurio_busy_default import grace_holds", inbound)
+        self.assertIn("if not grace_holds(event, effective_busy_input_mode):", inbound)
 
 
 if __name__ == "__main__":
