@@ -134,6 +134,9 @@ jobs:
             # _gc_oauth_sessions marks a still-pending session cancelled before it removes it, under
             # the lock every poller's final check-and-save holds, and _drop_oauth_session marks the
             # session it forgets.
+            # oauth: whether the signed-in ChatGPT account may run the configured model (listed below
+            # too): GET /api/providers/oauth/openai-codex/entitlement answers with the entitlement()
+            # of gateway/lazurio_codex_entitlement.py.
             hermes_cli/web_routers/oauth.py
             # oauth: identify names the sign-in cancel contract, and a stopping gateway keeps it:
             # publish_gateway_runtime_ready lists the CAPABILITY of gateway/lazurio_oauth_contract.py
@@ -143,6 +146,9 @@ jobs:
             # pairing: a configured text replaces the reply that gives an unknown sender its code
             # (listed below too): publish_gateway_runtime_ready also lists the CAPABILITY of
             # gateway/lazurio_pairing_message.py.
+            # oauth: whether the signed-in ChatGPT account may run the configured model:
+            # publish_gateway_runtime_ready also lists the CAPABILITY of
+            # gateway/lazurio_codex_entitlement.py.
             gateway/run_runtime.py
             gateway/status.py
             # pairing: a configured text replaces the reply that gives an unknown sender its code:
