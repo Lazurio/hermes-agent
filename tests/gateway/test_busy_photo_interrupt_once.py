@@ -28,6 +28,8 @@ async def _followup_while_running(monkeypatch, event, marker, *, fail_admit=Fals
     from tests.waiting import async_wait_until
 
     monkeypatch.setenv("DISCORD_ALLOWED_USERS", "42")
+    # The interrupt path this file tests; Lazurio's default is steer (gateway/lazurio_busy_default.py).
+    monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "interrupt")
     runner = GatewayRunner(GatewayConfig())
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="fixture-token", typing_indicator=False))
 

@@ -163,6 +163,12 @@ jobs:
             # cannot parse as empty without writing the auth.json.corrupt copy, since no save follows
             # that read; every other read keeps upstream's copy.
             hermes_cli/auth.py
+            # gateway: a message that arrives while Buddy works steers his running turn by default:
+            # _load_busy_input_mode falls back to BUSY_INPUT_DEFAULT of gateway/lazurio_busy_default.py
+            # where neither the environment nor config.yaml names a mode. Upstream's test of the
+            # interrupt path names the mode it tests instead of relying on the default.
+            gateway/run_config_loaders.py
+            tests/gateway/test_busy_photo_interrupt_once.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
           # deletion plus a new file) or changing its type always fails, allowlisted or not.
@@ -250,13 +256,19 @@ jobs:
           # descriptor and the strict identify reader, and the runtime lock's release on every way
           # out: the stop of a real gateway process, an early exit, the exit backstop and the shutdown
           # watchdog), and upstream's tests of the reply seam the pairing row touches (the code's reply
-          # off the event loop and what an unknown sender is told), and upstream's tests of the auth
+          # off the event loop and what an unknown sender is told), upstream's tests of the auth
           # store loader the entitlement row touches (a store that cannot be read or parsed, and its
-          # encoding).
+          # encoding), and upstream's tests of the busy-input seams the busy default row touches (the
+          # mode /busy writes and reports, a routed profile's own mode, and the steer, queue and
+          # interrupt paths of a message that arrives while a turn runs).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
+            tests/gateway/test_authority_busy_preempt_parity.py
             tests/gateway/test_bootstrap_early_exit_teardown.py
+            tests/gateway/test_busy_command.py
+            tests/gateway/test_busy_session_ack.py
+            tests/gateway/test_busy_steer_origin.py
             tests/gateway/test_claim_reopen_off_loop.py
             tests/gateway/test_delegation_session_id_leak.py
             tests/gateway/test_display_admission.py
@@ -266,8 +278,10 @@ jobs:
             tests/gateway/test_local_context_ref_turn_text.py
             tests/gateway/test_local_turn_origin_execute_code_gate.py
             tests/gateway/test_local_viewer_events_submit.py
+            tests/gateway/test_multiplex_busy_input_mode.py
             tests/gateway/test_normal_runtime_boot.py
             tests/gateway/test_pairing_reply_off_loop.py
+            tests/gateway/test_pending_steer_drain.py
             tests/gateway/test_runtime_bootstrap_lifecycle.py
             tests/gateway/test_runtime_describe_skin.py
             tests/gateway/test_runtime_ownership.py
@@ -284,7 +298,9 @@ jobs:
             tests/gateway/test_shutdown_runtime_ownership.py
             tests/gateway/test_shutdown_watchdog.py
             tests/gateway/test_status.py
+            tests/gateway/test_steer_command.py
             tests/gateway/test_surface_admission.py
+            tests/gateway/test_tui_busy_default.py
             tests/gateway/test_unauthorized_sender_notices.py
             tests/hermes_cli/test_anon_desktop_signin.py
             tests/hermes_cli/test_auth_store_read_failure.py
