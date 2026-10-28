@@ -708,6 +708,15 @@ async def list_oauth_providers(profile: Optional[str] = None):
     return await scoped_to_thread(profile, _run)
 
 
+# Lazurio: whether the signed-in ChatGPT account may run the configured model
+# (gateway/lazurio_codex_entitlement.py).
+@router.get("/api/providers/oauth/openai-codex/entitlement")
+async def lazurio_codex_entitlement(profile: Optional[str] = None):
+    from gateway.lazurio_codex_entitlement import entitlement
+
+    return await scoped_to_thread(profile, entitlement)
+
+
 def _reject_if_not_disconnectable(provider: dict[str, Any], status: dict[str, Any]) -> None:
     disconnect_hint = _oauth_provider_disconnect_hint(provider, status)
     if disconnect_hint:

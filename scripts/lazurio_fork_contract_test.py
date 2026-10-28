@@ -261,6 +261,26 @@ class Overlay(unittest.TestCase):
         self.assertIn("reply = lazurio_pairing_reply(code) or pairing_code_reply(", inbound)
         self.assertIn("from gateway.lazurio_pairing_message import CAPABILITY", read("gateway/run_runtime.py"))
 
+    def test_the_entitlement_row_names_its_route_capability_and_hooks(self):
+        """The account entitlement's row: the capability the code names is the one the runbook documents,
+        and its upstream hooks are allowlisted and call the Lazurio module."""
+        code = read("gateway/lazurio_codex_entitlement.py")
+        capability = re.search(r'^CAPABILITY = "(lazurio-[a-z-]+-v\d+)"$', code, re.MULTILINE)
+        assert capability, "gateway/lazurio_codex_entitlement.py names its capability"
+        subject = "oauth: whether the signed-in ChatGPT account may run the configured model"
+        row = re.search(rf"^\| `{re.escape(subject)}` \|(.+)\|$", RUNBOOK, re.MULTILINE)
+        assert row, "the overlay table lists the entitlement row"
+        route = "/api/providers/oauth/openai-codex/entitlement"
+        for name in (capability.group(1), route, "hermes_cli/web_routers/oauth.py", "gateway/run_runtime.py",
+                     "tests/gateway/test_lazurio_codex_entitlement.py"):
+            self.assertIn(name, row.group(1))
+        for path in ("hermes_cli/web_routers/oauth.py", "gateway/run_runtime.py"):
+            self.assertIn(path, allowlist())
+        oauth = read("hermes_cli/web_routers/oauth.py")
+        self.assertIn(f'@router.get("{route}")', oauth)
+        self.assertIn("from gateway.lazurio_codex_entitlement import entitlement", oauth)
+        self.assertIn("from gateway.lazurio_codex_entitlement import CAPABILITY", read("gateway/run_runtime.py"))
+
 
 if __name__ == "__main__":
     unittest.main()
