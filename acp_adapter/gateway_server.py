@@ -17,6 +17,7 @@ from acp.schema import (
 from hermes_cli.gateway_client import GatewayClientError, connect_gateway
 from hermes_constants import get_hermes_home
 from acp_adapter.gateway_reply import GatewayReplyMixin, _text
+from acp_adapter.lazurio_active_steer import ACTIVE_STEER_META, LazurioActiveSteerMixin
 from acp_adapter.lazurio_config_options import LazurioConfigOptionsMixin
 from acp_adapter.lazurio_silence import LazurioSilenceMixin
 from acp_adapter.lazurio_stop_and_send import LazurioStopAndSendMixin
@@ -67,7 +68,8 @@ def _tools_changed_notice(payload):
     return f"Editor MCP tools changed (servers: {servers}); the new tool list applies from the next turn.\n"
 
 
-class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfigOptionsMixin, GatewayReplyMixin, acp.Agent):
+class GatewayACPAgent(LazurioActiveSteerMixin, LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfigOptionsMixin,
+                      GatewayReplyMixin, acp.Agent):
     def __init__(self):
         self._conn = None
         self._gateway = None
@@ -148,7 +150,9 @@ class GatewayACPAgent(LazurioSilenceMixin, LazurioStopAndSendMixin, LazurioConfi
             agent_capabilities=AgentCapabilities(load_session=True,
                 prompt_capabilities=PromptCapabilities(image=True),
                 session_capabilities=SessionCapabilities(fork=SessionForkCapabilities(), list=SessionListCapabilities(),
-                                                         resume=SessionResumeCapabilities())),
+                                                         resume=SessionResumeCapabilities()),
+                # Lazurio: _lazurio/steer steers this editor's running turn (acp_adapter/lazurio_active_steer.py).
+                field_meta=dict(ACTIVE_STEER_META)),
             auth_methods=build_auth_methods())
 
     async def authenticate(self, method_id, **kwargs):
