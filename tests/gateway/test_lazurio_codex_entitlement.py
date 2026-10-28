@@ -182,6 +182,68 @@ def test_the_stored_sign_in_is_read_without_refreshing_anything(monkeypatch):
     assert subject._stored_sign_in() == ("", "")
 
 
+def _files(*roots):
+    """Every file under *roots* with its bytes and mtime, so a comparison sees any write."""
+    return {str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+            for root in roots for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+@pytest.fixture
+def stores(tmp_path, monkeypatch):
+    """This profile's auth.json and a global root's, which a profile's reads fall back to."""
+    import hermes_cli.auth
+
+    global_store = tmp_path / "global-root" / "auth.json"
+    global_store.parent.mkdir()
+    monkeypatch.setattr(hermes_cli.auth, "_global_auth_file_path", lambda: global_store)
+    monkeypatch.setattr(hermes_cli.auth, "_global_auth_store_cache", None)
+    return get_hermes_home() / "auth.json", global_store
+
+
+def test_a_store_that_cannot_be_parsed_reads_as_no_sign_in_and_nothing_is_written(stores, monkeypatch, caplog):
+    profile_store, global_store = stores
+    # Cut off mid-write, a synthetic access token already in it.
+    cut = '{"version": 1, "providers": {"openai-codex": {"tokens": {"access_token": "' + _token("plus")
+    profile_store.write_text(cut, encoding="utf-8")
+    global_store.write_text(cut, encoding="utf-8")
+    before = _files(profile_store.parent, global_store.parent)
+    monkeypatch.setattr(subject, "_configured_model", lambda: ("openai-codex", TERRA))
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.auth"):
+        assert subject._stored_sign_in() == ("", "")
+        assert entitlement()["verdict"] == "unknown"
+
+    assert _files(profile_store.parent, global_store.parent) == before
+    assert not profile_store.with_suffix(".json.corrupt").exists()
+    assert not global_store.with_suffix(".json.corrupt").exists()
+    # Both stores were read: the singleton's and the pool's fallback to the global root.
+    read = " ".join(record.getMessage() for record in caplog.records)
+    assert f"failed to parse {profile_store}" in read and f"failed to parse {global_store}" in read
+
+
+def test_a_writer_still_keeps_the_copy_of_a_store_that_cannot_be_parsed(stores):
+    import hermes_cli.auth
+
+    profile_store, _ = stores
+    profile_store.write_text('{"version": 1, "providers": {', encoding="utf-8")
+    assert subject._stored_sign_in() == ("", "")
+    assert not profile_store.with_suffix(".json.corrupt").exists()
+    # Outside the entitlement's read, upstream's recovery runs as before.
+    assert hermes_cli.auth._load_auth_store()["providers"] == {}
+    assert profile_store.with_suffix(".json.corrupt").read_bytes() == profile_store.read_bytes()
+
+
+def test_a_stored_sign_in_is_read_without_a_lock_or_any_other_write(stores):
+    profile_store, global_store = stores
+    token = _token("plus")
+    profile_store.write_text(json.dumps({"version": 1, "providers": {"openai-codex": {
+        "tokens": {"access_token": token, "refresh_token": "refresh-synthetic"}}}}), encoding="utf-8")
+    before = _files(profile_store.parent, global_store.parent)
+
+    assert subject._stored_sign_in()[0] == token
+    assert _files(profile_store.parent, global_store.parent) == before
+
+
 def test_the_catalog_is_every_listed_slug_lowercased_or_nothing(monkeypatch):
     import agent.model_metadata
 
