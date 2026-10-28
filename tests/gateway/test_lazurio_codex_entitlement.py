@@ -8,12 +8,15 @@ the configured model`` (docs/operations/lazurio-fork-release.md).
 """
 import base64
 import json
+import logging
+import time
 from types import SimpleNamespace
 
 import pytest
 
 import gateway.lazurio_codex_entitlement as subject
-from gateway.lazurio_codex_entitlement import CAPABILITY, catalog_slug, entitlement, plan_of, verdict
+from gateway.lazurio_codex_entitlement import (CAPABILITY, catalog_slug, entitlement, plan_of, token_expired,
+                                               verdict)
 from hermes_constants import get_hermes_home
 
 TERRA = "gpt-6.1-terra"
@@ -29,12 +32,16 @@ def _jwt(claims: dict) -> str:
     return f"{part({'alg': 'none'})}.{part(claims)}.signature"
 
 
-def _token(plan=None) -> str:
-    """A synthetic access token in the shape ChatGPT's OAuth issues: the plan sits in the auth claim."""
+def _token(plan=None, exp="fresh") -> str:
+    """A synthetic access token in the shape ChatGPT's OAuth issues: the plan sits in the auth claim;
+    *exp* is ``"fresh"`` (an hour ahead), ``"expired"`` (an hour ago) or None (no claim)."""
     auth = {"chatgpt_account_id": ACCOUNT_ID}
     if plan is not None:
         auth["chatgpt_plan_type"] = plan
-    return _jwt({"https://api.openai.com/auth": auth, "https://api.openai.com/profile": {"email": EMAIL}})
+    claims = {"https://api.openai.com/auth": auth, "https://api.openai.com/profile": {"email": EMAIL}}
+    if exp is not None:
+        claims["exp"] = int(time.time()) + (3600 if exp == "fresh" else -3600)
+    return _jwt(claims)
 
 
 @pytest.fixture
@@ -175,20 +182,55 @@ def test_the_stored_sign_in_is_read_without_refreshing_anything(monkeypatch):
     assert subject._stored_sign_in() == ("", "")
 
 
-def test_the_catalog_is_the_accounts_lowercased_slugs_or_nothing(monkeypatch):
+def test_the_catalog_is_every_listed_slug_lowercased_or_nothing(monkeypatch):
     import agent.model_metadata
 
-    answers = iter([({"GPT-6.1-Terra": 500_000, "gpt-6.1-sol": 500_000}, True), ({}, False)])
-    monkeypatch.setattr(agent.model_metadata, "_fetch_codex_oauth_context_lengths_with_source",
-                        lambda token, base_url="": next(answers))
+    monkeypatch.setattr(agent.model_metadata, "_codex_catalog_probe_allowed", lambda token, base_url="": True)
+    # A row counts by its slug alone, also without a context window (review of #20).
+    answers = iter([
+        ([{"slug": "GPT-6.1-Terra"}, {"slug": "gpt-6.1-sol", "context_window": 500_000}, {"name": "no slug"}], 200),
+        ([], 200),
+        ([{"slug": "gpt-6.1-terra"}], 401),
+    ])
+    monkeypatch.setattr(agent.model_metadata, "fetch_codex_catalog_entries",
+                        lambda get, base_url="": next(answers))
     assert subject._catalog("token", "") == frozenset({"gpt-6.1-terra", "gpt-6.1-sol"})
     assert subject._catalog("token", "") is None
-
-    def broken(token, base_url=""):
-        raise OSError("network down")
-
-    monkeypatch.setattr(agent.model_metadata, "_fetch_codex_oauth_context_lengths_with_source", broken)
     assert subject._catalog("token", "") is None
+    # A credential the probe may not carry to the endpoint is never sent.
+    monkeypatch.setattr(agent.model_metadata, "_codex_catalog_probe_allowed", lambda token, base_url="": False)
+    assert subject._catalog("token", "") is None
+
+
+def test_a_failed_catalog_probe_never_logs_the_credential(monkeypatch, caplog):
+    import agent.model_metadata
+
+    token = _token("plus")
+    monkeypatch.setattr(agent.model_metadata, "_codex_catalog_probe_allowed", lambda t, base_url="": True)
+
+    def broken(get, base_url=""):
+        raise OSError(f"network down for Bearer {token}")
+
+    monkeypatch.setattr(agent.model_metadata, "fetch_codex_catalog_entries", broken)
+    with caplog.at_level(logging.DEBUG, logger="gateway.lazurio_codex_entitlement"):
+        assert subject._catalog(token, "") is None
+    assert "OSError" in caplog.text
+    assert token not in caplog.text and token.split(".")[1] not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_an_expired_token_tells_no_plan_and_asks_no_catalog(account):
+    assert token_expired(_token("free", exp="expired"))
+    assert not token_expired(_token("free"))
+    assert not token_expired(_token("free", exp=None))
+    for plan in ("free", "plus"):
+        account["token"] = _token(plan, exp="expired")
+        assert entitlement() == {"provider": "openai-codex", "model": TERRA, "plan": None,
+                                 "catalog": "not-asked", "verdict": "unknown"}
+    assert account["probes"] == []
+    # A token without an exp claim is not known to be expired: the plan rule applies.
+    account["token"] = _token("free", exp=None)
+    assert entitlement()["verdict"] == "no-subscription"
 
 
 def test_the_dashboard_route_serves_the_answer(account):

@@ -10,17 +10,21 @@ sign-in:
 - ``entitlement()`` answers for ``model.default`` under ``model.provider`` ``openai-codex``:
   - the account's plan: ``chatgpt_plan_type`` in the OAuth access token's
     ``https://api.openai.com/auth`` claim, read with no network call;
-  - whether the account's own Codex model catalog lists the model: the probe of
-    ``agent.model_metadata``, cached per token for an hour;
+  - whether the account's own Codex model catalog lists the model: every row's slug, whatever
+    other metadata the row carries, from the catalog endpoint ``agent.model_metadata`` asks;
   - one verdict, decided in this order:
-    1. no stored sign-in, another provider or no model: ``unknown``;
+    1. no stored sign-in, another provider, no model, or an access token past its ``exp``
+       (the read-only path refreshes nothing, so an expired token cannot tell the current plan):
+       ``unknown``;
     2. the plan ``free``: ``no-subscription``, whatever the catalog says;
     3. a catalog that answers without the model (vendor prefix and ``-900k`` alias stripped):
        ``model-missing``;
     4. no catalog: ``unknown``, which blocks nothing;
     5. otherwise ``usable``.
 - The credential is read the way status reads it (``read_only=True``). Nothing is refreshed,
-  adopted or written. The answer never carries the token, the account id or an e-mail address.
+  adopted or written. The answer never carries the token, the account id or an e-mail address, and
+  a failed catalog probe is logged by its exception's type alone, since its message or traceback
+  may carry the request's credential.
 - ``GET /api/providers/oauth/openai-codex/entitlement`` (``hermes_cli/web_routers/oauth.py``) serves
   it. A ready gateway's ``identify`` lists ``CAPABILITY``
   (``run_runtime.publish_gateway_runtime_ready``), so a client asks only where it gets an answer.
@@ -32,6 +36,7 @@ model entitlement itself.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -52,6 +57,15 @@ def plan_of(access_token: Any) -> Optional[str]:
     return plan.strip().lower() if isinstance(plan, str) and plan.strip() else None
 
 
+def token_expired(access_token: Any, now: Optional[float] = None) -> bool:
+    """Whether the access token's ``exp`` lies in the past; a token without one is not known to be
+    expired."""
+    from hermes_cli.auth_constants import _decode_jwt_claims
+
+    exp = _decode_jwt_claims(access_token).get("exp")
+    return isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp <= (time.time() if now is None else now)
+
+
 def catalog_slug(model: str) -> str:
     """The slug the account's catalog lists for *model*: lowercased, without a vendor prefix or
     the picker's ``-900k`` alias."""
@@ -61,10 +75,10 @@ def catalog_slug(model: str) -> str:
 
 
 def verdict(*, signed_in: bool, provider: str, model: str, plan: Optional[str],
-            catalog: Optional[frozenset]) -> str:
+            catalog: Optional[frozenset], expired: bool = False) -> str:
     """The verdict of the rules above; *catalog* is the account's lowercased slugs, or None when it
-    was not read or could not be."""
-    if not signed_in or provider != PROVIDER or not model:
+    was not read or could not be; *expired*: the stored access token is past its ``exp``."""
+    if not signed_in or provider != PROVIDER or not model or expired:
         return "unknown"
     if plan in NO_SUBSCRIPTION_PLANS:
         return "no-subscription"
@@ -103,26 +117,41 @@ def _stored_sign_in() -> tuple[str, str]:
 
 
 def _catalog(access_token: str, base_url: str) -> Optional[frozenset]:
-    """The lowercased slugs of the account's own Codex catalog; None when it could not be read."""
-    from agent.model_metadata import _fetch_codex_oauth_context_lengths_with_source
+    """The lowercased slugs of every row the account's own Codex catalog lists, whatever other
+    metadata a row carries; None when it could not be read."""
+    from agent import model_metadata
+    from agent.codex_headers import codex_account_headers
 
-    try:
-        lengths, _fresh = _fetch_codex_oauth_context_lengths_with_source(access_token, base_url=base_url)
-    except Exception:
-        logger.debug("The Codex catalog probe for the entitlement failed", exc_info=True)
+    if not model_metadata._codex_catalog_probe_allowed(access_token, base_url):
         return None
-    return frozenset(slug.lower() for slug in lengths) or None
+    headers = {"Authorization": f"Bearer {access_token}", **codex_account_headers(access_token)}
+    http = model_metadata.model_metadata_http
+    try:
+        entries, status = model_metadata.fetch_codex_catalog_entries(
+            lambda url: http.get(url, headers=headers, timeout=(5, 10), verify=http.resolve_verify()),
+            base_url=base_url,
+        )
+    except Exception as exc:
+        # Only the type: the message or the traceback may carry the request's credential.
+        logger.debug("The Codex catalog probe for the entitlement failed (%s)", type(exc).__name__)
+        return None
+    if status != 200:
+        return None
+    slugs = (entry.get("slug") for entry in entries if isinstance(entry, dict))
+    return frozenset(slug.strip().lower() for slug in slugs if isinstance(slug, str) and slug.strip()) or None
 
 
 def entitlement() -> dict[str, Any]:
     """The answer of ``GET /api/providers/oauth/openai-codex/entitlement`` for the current profile."""
     provider, model = _configured_model()
     token, base_url = _stored_sign_in() if provider == PROVIDER else ("", "")
-    plan = plan_of(token) if token else None
+    expired = bool(token) and token_expired(token)
+    # An expired token cannot tell the current plan; nothing here refreshes it.
+    plan = plan_of(token) if token and not expired else None
     catalog: Optional[frozenset] = None
     state = "not-asked"
     # A free plan is refused whatever its catalog says, so its catalog is not asked.
-    if token and model and plan not in NO_SUBSCRIPTION_PLANS:
+    if token and model and not expired and plan not in NO_SUBSCRIPTION_PLANS:
         catalog = _catalog(token, base_url)
         state = "unreachable" if catalog is None else ("listed" if catalog_slug(model) in catalog else "missing")
     return {
@@ -130,5 +159,6 @@ def entitlement() -> dict[str, Any]:
         "model": model or None,
         "plan": plan,
         "catalog": state,
-        "verdict": verdict(signed_in=bool(token), provider=provider, model=model, plan=plan, catalog=catalog),
+        "verdict": verdict(signed_in=bool(token), provider=provider, model=model, plan=plan, catalog=catalog,
+                           expired=expired),
     }
