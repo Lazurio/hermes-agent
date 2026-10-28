@@ -303,6 +303,23 @@ class Overlay(unittest.TestCase):
         self.assertIn("class GatewayACPAgent(LazurioActiveSteerMixin,", viewer)
         self.assertIn("field_meta=dict(ACTIVE_STEER_META)", viewer)
 
+    def test_the_busy_default_row_names_its_default_and_hook(self):
+        """The busy default row: the default the code names is the one the runbook documents, and
+        the loader that falls back to it is allowlisted and calls it."""
+        self.assertIn('BUSY_INPUT_DEFAULT = "steer"', read("gateway/lazurio_busy_default.py"))
+        subject = "gateway: a message that arrives while Buddy works steers his running turn by default"
+        row = re.search(rf"^\| `{re.escape(subject)}` \|(.+)\|$", RUNBOOK, re.MULTILINE)
+        assert row, "the overlay table lists the busy default row"
+        for name in ("`steer`", "gateway/lazurio_busy_default.py", "gateway/run_config_loaders.py",
+                     "tests/gateway/test_lazurio_busy_default.py",
+                     "tests/gateway/test_busy_photo_interrupt_once.py"):
+            self.assertIn(name, row.group(1))
+        for path in ("gateway/run_config_loaders.py", "tests/gateway/test_busy_photo_interrupt_once.py"):
+            self.assertIn(path, allowlist())
+        loaders = read("gateway/run_config_loaders.py")
+        self.assertIn("from gateway.lazurio_busy_default import BUSY_INPUT_DEFAULT", loaders)
+        self.assertIn("return mode if mode in _BUSY_INPUT_MODES else BUSY_INPUT_DEFAULT", loaders)
+
 
 if __name__ == "__main__":
     unittest.main()

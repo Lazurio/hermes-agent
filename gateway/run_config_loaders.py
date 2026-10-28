@@ -245,9 +245,10 @@ class GatewayConfigLoadersMixin:
 
     @classmethod
     def _load_busy_input_mode(cls) -> str:
-        """Gateway drain-time busy-input behavior from env/config (default ``interrupt``)."""
+        """Gateway drain-time busy-input behavior from env/config (Lazurio's default ``steer``)."""
+        from gateway.lazurio_busy_default import BUSY_INPUT_DEFAULT
         mode = cls._env_or_cfg_str("HERMES_GATEWAY_BUSY_INPUT_MODE", "display", "busy_input_mode").lower()
-        return mode if mode in {"queue", "steer"} else "interrupt"
+        return mode if mode in _BUSY_INPUT_MODES else BUSY_INPUT_DEFAULT
 
     @classmethod
     def _load_busy_text_mode(cls) -> str:
