@@ -285,6 +285,24 @@ class Overlay(unittest.TestCase):
         self.assertIn("from hermes_cli.lazurio_auth_store_reads import reading_only", read("hermes_cli/auth.py"))
         self.assertIn("with reads_only():", code)
 
+    def test_the_active_steer_row_names_its_extension_meta_and_hooks(self):
+        """The steer row: the extension and the meta key the code names are the ones the runbook
+        documents, and the viewer that mixes it in is allowlisted and announces it."""
+        code = read("acp_adapter/lazurio_active_steer.py")
+        self.assertIn('STEER_METHOD = "lazurio/steer"', code)
+        self.assertIn('ACTIVE_STEER_META = {"lazurio.activeSteer": 1}', code)
+        subject = "acp: a message sent while Buddy works steers his running turn, never stops it"
+        row = re.search(rf"^\| `{re.escape(subject)}` \|(.+)\|$", RUNBOOK, re.MULTILINE)
+        assert row, "the overlay table lists the active steer row"
+        for name in ("_lazurio/steer", "lazurio.activeSteer", "acp_adapter/lazurio_active_steer.py",
+                     "acp_adapter/gateway_server.py", "tests/acp_adapter/test_lazurio_active_steer.py",
+                     "tests/acp_adapter/test_lazurio_active_steer_wire.py"):
+            self.assertIn(name, row.group(1))
+        self.assertIn("acp_adapter/gateway_server.py", allowlist())
+        viewer = read("acp_adapter/gateway_server.py")
+        self.assertIn("class GatewayACPAgent(LazurioActiveSteerMixin,", viewer)
+        self.assertIn("field_meta=dict(ACTIVE_STEER_META)", viewer)
+
 
 if __name__ == "__main__":
     unittest.main()

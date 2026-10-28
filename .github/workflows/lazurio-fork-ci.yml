@@ -86,6 +86,9 @@ jobs:
             # acp: a turn's commands see the LAZURIO_BUDDY_CHANNEL of the ACP viewer that submitted
             # it (listed below too): _client reads the field from this process's environment and the
             # owner's runtime.describe through gateway/lazurio_buddy_channel.py, and prompt sends it.
+            # acp: a message sent while Buddy works steers his running turn, never stops it: the viewer
+            # mixes in acp_adapter/lazurio_active_steer.py, which answers _lazurio/steer, and
+            # initialize lists lazurio.activeSteer in the agent capabilities' _meta.
             acp_adapter/gateway_server.py
             # acp: hermes acp --check also checks the MCP SDK: _run_check calls
             # acp_adapter/lazurio_check.py.
