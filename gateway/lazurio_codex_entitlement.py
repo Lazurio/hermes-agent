@@ -21,10 +21,12 @@ sign-in:
        ``model-missing``;
     4. no catalog: ``unknown``, which blocks nothing;
     5. otherwise ``usable``.
-- The credential is read the way status reads it (``read_only=True``). Nothing is refreshed,
-  adopted or written. The answer never carries the token, the account id or an e-mail address, and
-  a failed catalog probe is logged by its exception's type alone, since its message or traceback
-  may carry the request's credential.
+- The credential is read the way status reads it (``read_only=True``), inside
+  ``hermes_cli/lazurio_auth_store_reads.py``'s ``reads_only()``. Nothing is refreshed, adopted or
+  written, not even the ``auth.json.corrupt`` copy a writer keeps of a store that cannot be parsed:
+  such a store reads as no sign-in. The answer never carries the token, the account id or an e-mail
+  address, and a failed catalog probe is logged by its exception's type alone, since its message or
+  traceback may carry the request's credential.
 - ``GET /api/providers/oauth/openai-codex/entitlement`` (``hermes_cli/web_routers/oauth.py``) serves
   it. A ready gateway's ``identify`` lists ``CAPABILITY``
   (``run_runtime.publish_gateway_runtime_ready``), so a client asks only where it gets an answer.
@@ -107,9 +109,13 @@ def _configured_model() -> tuple[str, str]:
 def _stored_sign_in() -> tuple[str, str]:
     """(access token, base URL) of the stored Codex sign-in, read-only; empty when there is none."""
     from hermes_cli.auth_codex import resolve_codex_runtime_credentials
+    from hermes_cli.lazurio_auth_store_reads import reads_only
 
     try:
-        credentials = resolve_codex_runtime_credentials(read_only=True)
+        # read_only=True refreshes, adopts and saves nothing; reads_only() also keeps the copy of a
+        # store that cannot be parsed off the disk, the pool's global-root fallback included.
+        with reads_only():
+            credentials = resolve_codex_runtime_credentials(read_only=True)
     except Exception:
         return "", ""
     token = credentials.get("api_key")

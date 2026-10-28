@@ -272,14 +272,18 @@ class Overlay(unittest.TestCase):
         assert row, "the overlay table lists the entitlement row"
         route = "/api/providers/oauth/openai-codex/entitlement"
         for name in (capability.group(1), route, "hermes_cli/web_routers/oauth.py", "gateway/run_runtime.py",
+                     "hermes_cli/lazurio_auth_store_reads.py", "hermes_cli/auth.py",
                      "tests/gateway/test_lazurio_codex_entitlement.py"):
             self.assertIn(name, row.group(1))
-        for path in ("hermes_cli/web_routers/oauth.py", "gateway/run_runtime.py"):
+        for path in ("hermes_cli/web_routers/oauth.py", "gateway/run_runtime.py", "hermes_cli/auth.py"):
             self.assertIn(path, allowlist())
         oauth = read("hermes_cli/web_routers/oauth.py")
         self.assertIn(f'@router.get("{route}")', oauth)
         self.assertIn("from gateway.lazurio_codex_entitlement import entitlement", oauth)
         self.assertIn("from gateway.lazurio_codex_entitlement import CAPABILITY", read("gateway/run_runtime.py"))
+        # The stored sign-in is read inside reads_only(), which the auth store loader honours.
+        self.assertIn("from hermes_cli.lazurio_auth_store_reads import reading_only", read("hermes_cli/auth.py"))
+        self.assertIn("with reads_only():", code)
 
 
 if __name__ == "__main__":

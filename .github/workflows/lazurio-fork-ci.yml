@@ -155,6 +155,11 @@ jobs:
             # _hm_offer_pairing_code sends the reply of gateway/lazurio_pairing_message.py where
             # config.yaml sets one, and upstream's otherwise.
             gateway/run_inbound.py
+            # oauth: whether the signed-in ChatGPT account may run the configured model: inside
+            # reads_only() of hermes_cli/lazurio_auth_store_reads.py, _load_auth_store reads a store it
+            # cannot parse as empty without writing the auth.json.corrupt copy, since no save follows
+            # that read; every other read keeps upstream's copy.
+            hermes_cli/auth.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
           # deletion plus a new file) or changing its type always fails, allowlisted or not.
@@ -242,7 +247,9 @@ jobs:
           # descriptor and the strict identify reader, and the runtime lock's release on every way
           # out: the stop of a real gateway process, an early exit, the exit backstop and the shutdown
           # watchdog), and upstream's tests of the reply seam the pairing row touches (the code's reply
-          # off the event loop and what an unknown sender is told).
+          # off the event loop and what an unknown sender is told), and upstream's tests of the auth
+          # store loader the entitlement row touches (a store that cannot be read or parsed, and its
+          # encoding).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
@@ -277,6 +284,8 @@ jobs:
             tests/gateway/test_surface_admission.py
             tests/gateway/test_unauthorized_sender_notices.py
             tests/hermes_cli/test_anon_desktop_signin.py
+            tests/hermes_cli/test_auth_store_read_failure.py
+            tests/hermes_cli/test_auth_store_windows_encoding.py
             tests/hermes_cli/test_gateway_runtime.py
             tests/hermes_cli/test_gateway_runtime_discovery.py
             tests/hermes_cli/test_native_profile_scope_threads.py

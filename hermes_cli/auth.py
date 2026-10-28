@@ -752,6 +752,12 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> dict[str, Any]:
             auth_file, exc_info=True)
         raise
     except Exception as exc:
+        # Lazurio: a read no save follows leaves the file as it is; the next writer to read it keeps
+        # the copy (hermes_cli/lazurio_auth_store_reads.py).
+        from hermes_cli.lazurio_auth_store_reads import reading_only
+        if reading_only():
+            logger.warning("auth: failed to parse %s (%s), reading it as an empty store", auth_file, exc)
+            return _empty_auth_store()
         # Genuine corruption: unparseable JSON or non-UTF-8 bytes. Preserve a copy, but never
         # advertise a backup that was not written.
         corrupt_path = auth_file.with_suffix(".json.corrupt")
