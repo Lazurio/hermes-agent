@@ -173,9 +173,11 @@ def adopts_owner_agent(authority, ref):
 
 
 async def correct(connection, ref, params, *, verb):
-    if (set(params) - {'session_id', 'profile', 'text', 'execution_generation'}
+    # Lazurio: a keyed steer is applied once (gateway/lazurio_steer_receipts.py).
+    from gateway import lazurio_steer_receipts as lazurio_receipts
+    if (set(params) - {'session_id', 'profile', 'text', 'execution_generation', lazurio_receipts.KEY}
             or not isinstance(params.get('text'), str) or not params['text'].strip()
-            or type(params.get('execution_generation')) is not int):
+            or type(params.get('execution_generation')) is not int or not lazurio_receipts.valid(params)):
         raise RuntimeStoreError('invalid_params')
     authorize(connection, ref, params, 'session:control')
     # TUI-26: text typed during a running turn in Ink's interrupt/steer busy modes arrives here, not
@@ -188,6 +190,9 @@ async def correct(connection, ref, params, *, verb):
     generation = params['execution_generation']
     live = authority.sessions[ref.session_id]
     with live.event_stream.lock:
+        replayed = lazurio_receipts.replay(authority, ref.session_id, params)
+        if replayed is not None:
+            return replayed
         authority.check_approval_generation(ref.session_id, generation)
         # Managed workers have a separate control channel, not a cached owner
         # agent. Refuse explicitly instead of acknowledging undeliverable text.
@@ -197,8 +202,9 @@ async def correct(connection, ref, params, *, verb):
         # the agent this generation adopts, never a later one.
         agent, latched = authority.steer_agent(ref, generation, params['text'] if verb == 'steer' else None)
         if latched:
-            return {'status': 'queued', 'text': params['text'], 'execution_generation': generation,
-                    'authority_epoch': authority.epoch}
+            return lazurio_receipts.remember(authority, ref.session_id, params, {
+                'status': 'queued', 'text': params['text'], 'execution_generation': generation,
+                'authority_epoch': authority.epoch})
         # A claim can outlive the agent that carried it (a reaped turn the client still believes is
         # running), and a redirect in the build window has no agent to queue behind. Nothing live can
         # take the text, so answer 'rejected' — the wire contract's "not corrected, queue it as the
@@ -212,6 +218,6 @@ async def correct(connection, ref, params, *, verb):
         if not callable(method):
             raise RuntimeStoreError('execution_not_ready')
         accepted = method(params['text'])
-        return {'status': ({'steer': 'queued', 'redirect': 'redirected'}[verb] if accepted else 'rejected'),
-                'text': params['text'], 'execution_generation': generation,
-                'authority_epoch': authority.epoch}
+        return lazurio_receipts.remember(authority, ref.session_id, params, {
+            'status': ({'steer': 'queued', 'redirect': 'redirected'}[verb] if accepted else 'rejected'),
+            'text': params['text'], 'execution_generation': generation, 'authority_epoch': authority.epoch})

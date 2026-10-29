@@ -88,8 +88,9 @@ jobs:
             # owner's runtime.describe through gateway/lazurio_buddy_channel.py, and prompt sends it.
             # acp: a message sent while Buddy works steers his running turn, never stops it: the viewer
             # mixes in acp_adapter/lazurio_active_steer.py, which answers _lazurio/steer, initialize
-            # lists lazurio.activeSteer in the agent capabilities' _meta, and prompt hands the turn
-            # id of its _meta (lazurio.turnId) to _lazurio_note_turn first.
+            # lists lazurio.activeSteer in the agent capabilities' _meta, prompt hands the turn id of
+            # its _meta (lazurio.turnId) to _lazurio_note_turn first, and _client keeps the owner's
+            # capabilities, so a steer carries its key only to an owner that keeps receipts.
             acp_adapter/gateway_server.py
             # acp: hermes acp --check also checks the MCP SDK: _run_check calls
             # acp_adapter/lazurio_check.py.
@@ -106,6 +107,8 @@ jobs:
             # acp: a turn's commands see the LAZURIO_BUDDY_CHANNEL of the ACP viewer that submitted
             # it (listed below too): describe advertises its capability and submission forwards the
             # prompt.submit field to admission.
+            # acp: a message sent while Buddy works steers his running turn, never stops it (listed
+            # below too): describe advertises lazurio-steer-receipts-v1 (gateway/lazurio_steer_receipts.py).
             gateway/session_controls.py
             gateway/session_local_editor.py
             gateway/session_policy.py
@@ -125,6 +128,12 @@ jobs:
             # (run_turn_prepare.py), the session context declares it in _VAR_MAP and unsets it on
             # every new or cleared binding (session_context.py), and the bash snapshot never keeps it
             # (tools/environments/base_session_env.py).
+            # acp: a message sent while Buddy works steers his running turn, never stops it: the
+            # session.steer contract declares idempotency_key (canonical_sessions.py and its
+            # regenerated TypeScript and OpenRPC), and correct applies a keyed steer once through
+            # gateway/lazurio_steer_receipts.py, answering a repeat with its receipt even after the turn
+            # ended (gateway/session_busy_controls.py).
+            gateway/session_busy_controls.py
             apps/shared/src/gateway-contract.generated.ts
             apps/shared/src/gateway-contract.openrpc.json
             gateway/run_turn_prepare.py
@@ -290,6 +299,7 @@ jobs:
             tests/gateway/test_runtime_describe_skin.py
             tests/gateway/test_runtime_ownership.py
             tests/gateway/test_runtime_token_identity.py
+            tests/gateway/test_session_busy_controls.py
             tests/gateway/test_session_context_inheritance.py
             tests/gateway/test_session_edit_policy.py
             tests/gateway/test_session_env.py

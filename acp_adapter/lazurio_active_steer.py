@@ -19,8 +19,13 @@ Here the viewer answers the ACP extension request ``_lazurio/steer``
 - only the turn it names: a prompt carries its client turn's id in ``_meta`` (``lazurio.turnId``),
   and a steer whose ``turnId`` is not the one of this editor's latest prompt is ``not_running``, so a
   turn that ended while the steer was on its way never passes the message to the next one;
-- once per message: a ``messageId`` this admission was steered with, or is being steered with,
-  answers as that steer did, without a second ``session.steer`` (a retry after a lost answer);
+- once per message: a ``messageId`` already steered into the turn it names, or being steered,
+  answers as that steer did, without a second ``session.steer``, even after that turn ended and the
+  next one started (a retry after a lost answer); the viewer keeps the newest 256 per session;
+- once at the owner too: an owner that lists ``lazurio-steer-receipts-v1`` gets the steer with an
+  ``idempotency_key`` (gateway/lazurio_steer_receipts.py), so a retry after the owner's answer was
+  lost is never applied twice, and a turn that ended answers its receipt instead of
+  ``stale_generation``;
 - where no prompt of this editor runs, or its turn ended meanwhile (``stale_generation``), it answers
   ``{"steered": false, "reason": "not_running"}`` and starts nothing: the client sends the message as
   the next prompt;
@@ -37,6 +42,7 @@ request a client can use instead.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from typing import Any
 
 # What ``initialize`` adds to the agent capabilities' ``_meta``.
@@ -46,6 +52,8 @@ STEER_METHOD = "lazurio/steer"
 # The ``_meta`` key of ``session/prompt`` that names the client's turn (the SDK passes it as a keyword).
 TURN_META = "lazurio.turnId"
 NOT_RUNNING = {"steered": False, "reason": "not_running"}
+# Steers kept per session, newest last: a retry finds its answer after its turn ended.
+_STEERS = 256
 
 
 class LazurioActiveSteerMixin:
@@ -70,43 +78,50 @@ class LazurioActiveSteerMixin:
             raise RequestError.invalid_params(
                 {"reason": "sessionId, turnId, messageId and a non-empty text are required"})
         session_id = self._aliases.get(session_id, session_id)
-        if self.__dict__.get("_lazurio_turns", {}).get(session_id) != turn_id:
-            return NOT_RUNNING
-        admission_id = self._admissions.get(session_id)
-        if admission_id is None:
-            return NOT_RUNNING
-        # One steer per message and admission; a repeat waits for the first and answers as it did.
-        steers = self.__dict__.setdefault("_lazurio_steers", {})
-        held = steers.get(session_id)
-        if held is None or held[0] != admission_id:
-            held = steers[session_id] = (admission_id, {})
-        pending = held[1].get(message_id)
+        # One steer per turn and message: a repeat waits for the first and answers as it did,
+        # before the turn is checked, so a turn that ended still answers its own steer.
+        steers = self.__dict__.setdefault("_lazurio_steers", {}).setdefault(session_id, OrderedDict())
+        key = (turn_id, message_id)
+        pending = steers.get(key)
         if pending is None:
-            pending = held[1][message_id] = asyncio.ensure_future(
-                steer_running_turn(self, session_id, admission_id, text))
+            if self.__dict__.get("_lazurio_turns", {}).get(session_id) != turn_id:
+                return NOT_RUNNING
+            admission_id = self._admissions.get(session_id)
+            if admission_id is None:
+                return NOT_RUNNING
+            pending = steers[key] = asyncio.ensure_future(
+                steer_running_turn(self, session_id, admission_id, text, f"{turn_id}:{message_id}"))
+            while len(steers) > _STEERS:
+                steers.popitem(last=False)
         try:
             steered = await asyncio.shield(pending)
         except BaseException:
-            if pending.done() and held[1].get(message_id) is pending:
-                del held[1][message_id]  # a failed steer may be asked again
+            if pending.done() and steers.get(key) is pending:
+                del steers[key]  # asked again, it goes to the owner under the same key
             raise
-        if not steered and held[1].get(message_id) is pending:
-            del held[1][message_id]
+        if not steered and steers.get(key) is pending:
+            del steers[key]
         return {"steered": True} if steered else NOT_RUNNING
 
 
-async def steer_running_turn(agent, session_id: str, admission_id: str, text: str) -> bool:
+async def steer_running_turn(agent, session_id: str, admission_id: str, text: str, key: str) -> bool:
     """Steer this editor's running admission *admission_id* of *session_id*; False where it no longer
-    runs or ended meanwhile. Any other refusal of the owner is raised."""
+    runs or ended meanwhile. Any other refusal of the owner is raised. An owner that keeps receipts
+    gets *key*, and answers a steer it already applied even after the turn ended."""
+    from gateway.lazurio_steer_receipts import CAPABILITY, KEY
     from hermes_cli.gateway_client import GatewayRPCError
 
     client = await agent._client()
     receipt = await client.rpc("prompt.receipt", session_id=session_id, admission_id=admission_id)
-    if receipt.get("status") != "started":
+    keyed = {KEY: key} if CAPABILITY in getattr(agent, "_lazurio_owner_capabilities", ()) else {}
+    generation = receipt.get("execution_generation")
+    # Only a started turn takes a steer; one that ended may still hold the receipt of this key's steer.
+    if receipt.get("status") != "started" and not (keyed and receipt.get("status") == "terminal"
+                                                      and isinstance(generation, int)):
         return False
     try:
         result = await client.rpc("session.steer", session_id=session_id, text=text,
-                                  execution_generation=receipt["execution_generation"])
+                                  execution_generation=generation, **keyed)
     except GatewayRPCError as exc:
         # Only a turn that ended meanwhile leaves the message for the next prompt.
         if str(exc) == "stale_generation":
