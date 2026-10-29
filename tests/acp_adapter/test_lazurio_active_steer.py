@@ -16,24 +16,29 @@ import pytest
 from acp.exceptions import RequestError
 
 from acp_adapter.gateway_server import GatewayACPAgent
+from acp_adapter.lazurio_active_steer import TURN_META
 from hermes_cli.gateway_client import GatewayRPCError
 
 
 class Owner:
-    """A fake owner: ``prompt.submit`` admits ``a1``, which runs until :meth:`settle`; ``prompt.receipt``
-    answers ``receipt_status`` with generation 7; ``session.steer`` queues, or refuses with
-    ``steer_error``. A cancel is a failure of this overlay."""
+    """A fake owner: each ``prompt.submit`` admits the next ``a<n>``, which runs until :meth:`settle`;
+    ``prompt.receipt`` answers ``receipt_status`` with generation 7; ``session.steer`` waits for
+    ``steer_gate`` when one is set, then queues, or refuses with ``steer_error``. A cancel is a
+    failure of this overlay."""
 
     def __init__(self):
         self.calls, self.agent, self.receipt_status, self.steer_error = [], None, "started", None
+        self.steer_gate = None
 
     async def rpc(self, method, **params):
         self.calls.append((method, params))
         if method == "prompt.submit":
-            return {"admission_id": "a1"}
+            return {"admission_id": f"a{len(self.called('prompt.submit'))}"}
         if method == "prompt.receipt":
             return {"status": self.receipt_status, "execution_generation": 7}
         if method == "session.steer":
+            if self.steer_gate is not None:
+                await self.steer_gate.wait()
             if self.steer_error is not None:
                 raise GatewayRPCError(self.steer_error)
             return {"status": "queued"}
@@ -41,8 +46,8 @@ class Owner:
             raise AssertionError("a steer must never cancel the running turn")
         raise AssertionError(f"unexpected owner call {method}")
 
-    async def settle(self, outcome="completed"):
-        await self.agent._project({"session_id": "s", "type": "message.complete", "admission_id": "a1",
+    async def settle(self, admission_id="a1", outcome="completed"):
+        await self.agent._project({"session_id": "s", "type": "message.complete", "admission_id": admission_id,
                                    "payload": {"outcome": outcome, "text": ""}})
 
     def called(self, method):
@@ -59,12 +64,18 @@ def _agent():
     return agent, owner
 
 
-async def _running(agent):
-    """A prompt of this editor that runs until the owner settles it."""
-    running = asyncio.create_task(asyncio.wait_for(agent.prompt([acp.text_block("draft the notes")], "s"), 5))
-    while not agent._admissions.get("s"):
+async def _running(agent, turn="t1", admission="a1"):
+    """A prompt of this editor, for the client's turn *turn*, that runs until the owner settles it."""
+    meta = {} if turn is None else {TURN_META: turn}
+    running = asyncio.create_task(asyncio.wait_for(
+        agent.prompt([acp.text_block("draft the notes")], "s", **meta), 5))
+    while agent._admissions.get("s") != admission:
         await asyncio.sleep(0)
     return running
+
+
+def _steer(text, turn="t1", message="m1"):
+    return {"sessionId": "s", "turnId": turn, "messageId": message, "text": text}
 
 
 def _streamed(agent):
@@ -87,7 +98,7 @@ async def test_a_steer_while_the_prompt_runs_reaches_its_turn_and_nothing_is_can
     running = await _running(agent)
     streamed_before = len(_streamed(agent))
 
-    answer = await agent.ext_method("lazurio/steer", {"sessionId": "s", "text": "only cover the ACP changes"})
+    answer = await agent.ext_method("lazurio/steer", _steer("only cover the ACP changes"))
 
     assert answer == {"steered": True}
     # The running admission's own generation, as main's /steer steers it.
@@ -105,7 +116,7 @@ async def test_a_steer_while_the_prompt_runs_reaches_its_turn_and_nothing_is_can
 @pytest.mark.asyncio
 async def test_where_no_prompt_of_this_editor_runs_the_steer_says_so_and_starts_nothing():
     agent, owner = _agent()
-    answer = await agent.ext_method("lazurio/steer", {"sessionId": "s", "text": "too late"})
+    answer = await agent.ext_method("lazurio/steer", _steer("too late"))
     assert answer == {"steered": False, "reason": "not_running"}
     assert owner.calls == []
 
@@ -119,7 +130,7 @@ async def test_a_turn_that_ended_meanwhile_is_not_running_and_the_message_is_lef
         owner.receipt_status = "terminal"
     else:
         owner.steer_error = "stale_generation"
-    answer = await agent.ext_method("lazurio/steer", {"sessionId": "s", "text": "just in time"})
+    answer = await agent.ext_method("lazurio/steer", _steer("just in time"))
     assert answer == {"steered": False, "reason": "not_running"}
     assert owner.called("prompt.cancel") == []
     assert len(owner.called("prompt.submit")) == 1
@@ -133,14 +144,21 @@ async def test_another_refusal_of_the_owner_is_the_requests_error():
     running = await _running(agent)
     owner.steer_error = "permission_denied"
     with pytest.raises(GatewayRPCError, match="permission_denied"):
-        await agent.ext_method("lazurio/steer", {"sessionId": "s", "text": "go on"})
+        await agent.ext_method("lazurio/steer", _steer("go on"))
+    # A failed steer is not remembered: the same message, asked again, is steered.
+    owner.steer_error = None
+    assert await agent.ext_method("lazurio/steer", _steer("go on")) == {"steered": True}
+    assert len(owner.called("session.steer")) == 2
     await owner.settle()
     await running
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("params", [{"sessionId": "s"}, {"sessionId": "s", "text": "  "}, {"text": "go"}, []])
-async def test_a_steer_without_a_session_or_a_text_is_refused(params):
+@pytest.mark.parametrize("params", [
+    {"sessionId": "s"}, _steer("  "), {"turnId": "t1", "messageId": "m1", "text": "go"},
+    {"sessionId": "s", "messageId": "m1", "text": "go"}, _steer("go", turn=" "),
+    {"sessionId": "s", "turnId": "t1", "text": "go"}, _steer("go", message=""), []])
+async def test_a_steer_without_a_session_a_turn_a_message_or_a_text_is_refused(params):
     agent, owner = _agent()
     with pytest.raises(RequestError) as refused:
         await agent.ext_method("lazurio/steer", params)
@@ -154,3 +172,71 @@ async def test_any_other_extension_request_is_not_found():
     with pytest.raises(RequestError) as refused:
         await agent.ext_method("lazurio/unknown", {})
     assert refused.value.code == -32601
+
+
+@pytest.mark.asyncio
+async def test_a_steer_for_a_turn_that_ended_never_reaches_the_next_one():
+    """Lazurio/t3code#141, review: the client's turn A ended and its next turn B started while A's
+    steer was on its way. The steer names A, so B is never steered; a steer naming B is."""
+    agent, owner = _agent()
+    first = await _running(agent, turn="tA", admission="a1")
+    await owner.settle("a1")
+    await first
+    second = await _running(agent, turn="tB", admission="a2")
+
+    late = await agent.ext_method("lazurio/steer", _steer("only for A", turn="tA"))
+
+    assert late == {"steered": False, "reason": "not_running"}
+    assert owner.called("session.steer") == []
+    assert owner.called("prompt.receipt") == []
+    assert await agent.ext_method("lazurio/steer", _steer("for B", turn="tB", message="m2")) == {"steered": True}
+    assert owner.called("prompt.receipt") == [{"session_id": "s", "admission_id": "a2"}]
+    await owner.settle("a2")
+    await second
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_that_names_no_turn_is_never_steered():
+    agent, owner = _agent()
+    running = await _running(agent, turn=None)
+    assert await agent.ext_method("lazurio/steer", _steer("go on")) == {"steered": False, "reason": "not_running"}
+    assert owner.called("session.steer") == []
+    await owner.settle()
+    await running
+
+
+@pytest.mark.asyncio
+async def test_a_message_asked_again_is_steered_once():
+    """Lazurio/t3code#141, review: a retry after a lost answer, or a second request while the first
+    still runs, never puts the same guidance into the turn twice."""
+    agent, owner = _agent()
+    running = await _running(agent)
+
+    assert await agent.ext_method("lazurio/steer", _steer("only the ACP changes")) == {"steered": True}
+    assert await agent.ext_method("lazurio/steer", _steer("only the ACP changes")) == {"steered": True}
+    assert len(owner.called("session.steer")) == 1
+
+    owner.steer_gate = asyncio.Event()
+    both = asyncio.gather(*(agent.ext_method("lazurio/steer", _steer("and the tests", message="m2"))
+                            for _ in range(2)))
+    while len(owner.called("session.steer")) < 2:
+        await asyncio.sleep(0)
+    owner.steer_gate.set()
+    assert await both == [{"steered": True}, {"steered": True}]
+    assert [call["text"] for call in owner.called("session.steer")] == ["only the ACP changes", "and the tests"]
+    await owner.settle()
+    await running
+
+
+@pytest.mark.asyncio
+async def test_a_message_refused_before_its_turn_started_is_steered_when_asked_again():
+    """The client asks again while a not yet started prompt stays unsettled; the refusal is not kept."""
+    agent, owner = _agent()
+    running = await _running(agent)
+    owner.receipt_status = "queued"
+    assert await agent.ext_method("lazurio/steer", _steer("go on")) == {"steered": False, "reason": "not_running"}
+    owner.receipt_status = "started"
+    assert await agent.ext_method("lazurio/steer", _steer("go on")) == {"steered": True}
+    assert len(owner.called("session.steer")) == 1
+    await owner.settle()
+    await running

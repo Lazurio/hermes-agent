@@ -294,7 +294,9 @@ class Overlay(unittest.TestCase):
         subject = "acp: a message sent while Buddy works steers his running turn, never stops it"
         row = re.search(rf"^\| `{re.escape(subject)}` \|(.+)\|$", RUNBOOK, re.MULTILINE)
         assert row, "the overlay table lists the active steer row"
-        for name in ("_lazurio/steer", "lazurio.activeSteer", "acp_adapter/lazurio_active_steer.py",
+        self.assertIn('TURN_META = "lazurio.turnId"', code)
+        for name in ("_lazurio/steer", "lazurio.activeSteer", "lazurio.turnId", "turnId", "messageId",
+                     "_lazurio_note_turn", "acp_adapter/lazurio_active_steer.py",
                      "acp_adapter/gateway_server.py", "tests/acp_adapter/test_lazurio_active_steer.py",
                      "tests/acp_adapter/test_lazurio_active_steer_wire.py"):
             self.assertIn(name, row.group(1))
@@ -302,6 +304,10 @@ class Overlay(unittest.TestCase):
         viewer = read("acp_adapter/gateway_server.py")
         self.assertIn("class GatewayACPAgent(LazurioActiveSteerMixin,", viewer)
         self.assertIn("field_meta=dict(ACTIVE_STEER_META)", viewer)
+        # The viewer's prompt keeps the turn its _meta names before anything else (review of t3code#141).
+        self.assertIn("    async def prompt(self, prompt, session_id, **kwargs):\n"
+                      "        # Lazurio: the client's turn this prompt is for (acp_adapter/lazurio_active_steer.py).\n"
+                      "        self._lazurio_note_turn(session_id, kwargs)\n", viewer)
 
     def test_the_busy_default_row_names_its_default_and_hook(self):
         """The busy default row: the default the code names is the one the runbook documents, and
