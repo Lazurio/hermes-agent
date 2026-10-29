@@ -335,3 +335,31 @@ async def test_an_owner_receipt_answers_a_retry_even_after_the_turn_ended():
         "steered": False, "reason": "not_running"}
     await owner.settle("a1")
     await running
+
+
+@pytest.mark.asyncio
+async def test_a_lost_owner_answer_is_asked_again_about_its_own_turn_after_the_next_started():
+    """Lazurio/t3code#141, review round 2: the owner applied A's steer and its answer was lost, A
+    ended and B started. The retry asks the owner about A's admission under the same key, so it
+    answers A's receipt, and the client never sends the message again as a new turn."""
+    agent, owner = _receipt_agent()
+    first = await _running(agent, turn="tA", admission="a1")
+    with pytest.raises(ConnectionResetError):
+        await agent.ext_method("lazurio/steer", _steer("only the ACP changes", turn="tA"))
+    await owner.settle("a1")
+    await first
+    second = await _running(agent, turn="tB", admission="a2")
+    owner.receipt_status = "terminal"  # A's admission
+
+    again = await agent.ext_method("lazurio/steer", _steer("only the ACP changes", turn="tA"))
+
+    assert again == {"steered": True}
+    assert owner.applied == ["only the ACP changes"]
+    assert [call["admission_id"] for call in owner.called("prompt.receipt")] == ["a1", "a1"]
+    assert [call["idempotency_key"] for call in owner.called("session.steer")] == ["tA:m1", "tA:m1"]
+    # A message A never took is still refused for A, and B is never asked about it.
+    assert await agent.ext_method("lazurio/steer", _steer("late", turn="tA", message="m2")) == {
+        "steered": False, "reason": "not_running"}
+    assert len(owner.called("session.steer")) == 2
+    await owner.settle("a2")
+    await second
