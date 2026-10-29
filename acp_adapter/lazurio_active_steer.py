@@ -23,9 +23,10 @@ Here the viewer answers the ACP extension request ``_lazurio/steer``
   answers as that steer did, without a second ``session.steer``, even after that turn ended and the
   next one started (a retry after a lost answer); the viewer keeps the newest 256 per session;
 - once at the owner too: an owner that lists ``lazurio-steer-receipts-v1`` gets the steer with an
-  ``idempotency_key`` (gateway/lazurio_steer_receipts.py), so a retry after the owner's answer was
-  lost is never applied twice, and a turn that ended answers its receipt instead of
-  ``stale_generation``;
+  ``idempotency_key`` (gateway/lazurio_steer_receipts.py). A retry after the owner's answer was lost
+  asks the owner again about the same admission under the same key, even after that turn ended and
+  the next one started: the owner answers its receipt instead of applying the steer twice or
+  answering ``stale_generation``;
 - where no prompt of this editor runs, or its turn ended meanwhile (``stale_generation``), it answers
   ``{"steered": false, "reason": "not_running"}`` and starts nothing: the client sends the message as
   the next prompt;
@@ -81,27 +82,30 @@ class LazurioActiveSteerMixin:
         # One steer per turn and message: a repeat waits for the first and answers as it did,
         # before the turn is checked, so a turn that ended still answers its own steer.
         steers = self.__dict__.setdefault("_lazurio_steers", {}).setdefault(session_id, OrderedDict())
-        key = (turn_id, message_id)
-        pending = steers.get(key)
-        if pending is None:
+        key, steer_key = (turn_id, message_id), f"{turn_id}:{message_id}"
+        entry = steers.get(key)
+        if entry is not None and _failed(entry[1]):
+            # The owner's answer was lost: it is asked again about that admission, under the same key.
+            entry = steers[key] = (entry[0], asyncio.ensure_future(
+                steer_running_turn(self, session_id, entry[0], text, steer_key)))
+        if entry is None:
             if self.__dict__.get("_lazurio_turns", {}).get(session_id) != turn_id:
                 return NOT_RUNNING
             admission_id = self._admissions.get(session_id)
             if admission_id is None:
                 return NOT_RUNNING
-            pending = steers[key] = asyncio.ensure_future(
-                steer_running_turn(self, session_id, admission_id, text, f"{turn_id}:{message_id}"))
+            entry = steers[key] = (admission_id, asyncio.ensure_future(
+                steer_running_turn(self, session_id, admission_id, text, steer_key)))
             while len(steers) > _STEERS:
                 steers.popitem(last=False)
-        try:
-            steered = await asyncio.shield(pending)
-        except BaseException:
-            if pending.done() and steers.get(key) is pending:
-                del steers[key]  # asked again, it goes to the owner under the same key
-            raise
-        if not steered and steers.get(key) is pending:
+        steered = await asyncio.shield(entry[1])
+        if not steered and steers.get(key) is entry:
             del steers[key]
         return {"steered": True} if steered else NOT_RUNNING
+
+
+def _failed(steer: asyncio.Future) -> bool:
+    return steer.done() and (steer.cancelled() or steer.exception() is not None)
 
 
 async def steer_running_turn(agent, session_id: str, admission_id: str, text: str, key: str) -> bool:
