@@ -177,6 +177,8 @@ class GatewayACPAgent(LazurioActiveSteerMixin, LazurioSilenceMixin, LazurioStopA
                     # takes it (gateway/lazurio_buddy_channel.py).
                     from gateway.lazurio_buddy_channel import viewer_fields
                     self._lazurio_channel = viewer_fields(descriptor)
+                    # Lazurio: whether the owner keeps keyed steer receipts (lazurio_active_steer.py).
+                    self._lazurio_owner_capabilities = tuple(descriptor.get("capabilities") or ())
                     await self._reattach(gateway)
                 except BaseException:
                     await connection.__aexit__(None, None, None)

@@ -5085,6 +5085,7 @@ export interface CanonicalCorrectionParams {
   session_id: string
   execution_generation: number
   text: string
+  idempotency_key?: string | null
 }
 /** ``session.steer`` / ``session.redirect``: the correction verdict, or ``{voice_stopped: true}`` when the busy-time text was a bare stop phrase that ended the LOCAL voice chat. */
 export type CanonicalCorrectionResult = CanonicalCorrectionAck | CanonicalVoiceStopped

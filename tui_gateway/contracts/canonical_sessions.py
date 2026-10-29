@@ -267,6 +267,9 @@ class CanonicalControlParams(CanonicalSessionParams):
 
 class CanonicalCorrectionParams(CanonicalControlParams):
     text: str
+    # Lazurio overlay: a keyed correction is applied once per session, generation and key, and a
+    # repeat answers its receipt (``lazurio-steer-receipts-v1``, gateway/lazurio_steer_receipts.py).
+    idempotency_key: str | None = None
 
 
 class CanonicalCorrectionAck(Result):

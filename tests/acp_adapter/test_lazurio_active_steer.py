@@ -240,3 +240,98 @@ async def test_a_message_refused_before_its_turn_started_is_steered_when_asked_a
     assert len(owner.called("session.steer")) == 1
     await owner.settle()
     await running
+
+
+@pytest.mark.asyncio
+async def test_a_steer_asked_again_after_its_turn_ended_and_the_next_started_answers_as_it_did():
+    """Lazurio/hermes-agent#26, review: A took the steer, its answer was lost, A ended and B
+    started; the retry for A answers that steer instead of not_running, so the client never sends
+    the message again as a new turn."""
+    agent, owner = _agent()
+    first = await _running(agent, turn="tA", admission="a1")
+    assert await agent.ext_method("lazurio/steer", _steer("only the ACP changes", turn="tA")) == {"steered": True}
+    await owner.settle("a1")
+    await first
+    second = await _running(agent, turn="tB", admission="a2")
+
+    again = await agent.ext_method("lazurio/steer", _steer("only the ACP changes", turn="tA"))
+
+    assert again == {"steered": True}
+    assert len(owner.called("session.steer")) == 1
+    # A message A never took is still refused for A.
+    assert await agent.ext_method("lazurio/steer", _steer("late", turn="tA", message="m2")) == {
+        "steered": False, "reason": "not_running"}
+    await owner.settle("a2")
+    await second
+
+
+class ReceiptOwner(Owner):
+    """An owner that keeps keyed steer receipts, as gateway/lazurio_steer_receipts.py does: the first
+    keyed steer is applied and its answer then lost (``lose_first``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.applied, self.receipts, self.lose_first = [], {}, True
+
+    async def rpc(self, method, **params):
+        if method != "session.steer" or "idempotency_key" not in params:
+            return await super().rpc(method, **params)
+        key = (params["execution_generation"], params["idempotency_key"])
+        if key not in self.receipts and self.steer_error is not None:
+            return await super().rpc(method, **params)
+        self.calls.append((method, params))
+        if key not in self.receipts:
+            self.applied.append(params["text"])
+            self.receipts[key] = {"status": "queued"}
+            if self.lose_first:
+                self.lose_first = False
+                raise ConnectionResetError("the answer was lost")
+        return self.receipts[key]
+
+
+def _receipt_agent():
+    from gateway.lazurio_steer_receipts import CAPABILITY
+
+    owner = ReceiptOwner()
+    agent = GatewayACPAgent()
+    agent._gateway, agent._conn = AsyncMock(), AsyncMock()
+    agent._gateway.rpc.side_effect = owner.rpc
+    agent._snapshots["s"] = {"execution_generation": 1}
+    agent._lazurio_owner_capabilities = (CAPABILITY,)
+    owner.agent = agent
+    return agent, owner
+
+
+@pytest.mark.asyncio
+async def test_a_steer_whose_owner_answer_was_lost_is_applied_once_when_asked_again():
+    """Lazurio/hermes-agent#26, review: the owner applied the steer, its answer was lost; the retry
+    carries the same key, so the owner answers its receipt instead of applying it again."""
+    agent, owner = _receipt_agent()
+    running = await _running(agent, turn="tA", admission="a1")
+
+    with pytest.raises(ConnectionResetError):
+        await agent.ext_method("lazurio/steer", _steer("only the ACP changes", turn="tA"))
+    assert await agent.ext_method("lazurio/steer", _steer("only the ACP changes", turn="tA")) == {"steered": True}
+
+    assert owner.applied == ["only the ACP changes"]
+    assert [call["idempotency_key"] for call in owner.called("session.steer")] == ["tA:m1", "tA:m1"]
+    await owner.settle("a1")
+    await running
+
+
+@pytest.mark.asyncio
+async def test_an_owner_receipt_answers_a_retry_even_after_the_turn_ended():
+    agent, owner = _receipt_agent()
+    running = await _running(agent, turn="tA", admission="a1")
+    with pytest.raises(ConnectionResetError):
+        await agent.ext_method("lazurio/steer", _steer("only the ACP changes", turn="tA"))
+    owner.receipt_status = "terminal"  # the turn ended before the retry
+
+    assert await agent.ext_method("lazurio/steer", _steer("only the ACP changes", turn="tA")) == {"steered": True}
+    assert owner.applied == ["only the ACP changes"]
+    # A message the ended turn never took finds no receipt: the owner's fence answers it.
+    owner.steer_error = "stale_generation"
+    assert await agent.ext_method("lazurio/steer", _steer("late", turn="tA", message="m2")) == {
+        "steered": False, "reason": "not_running"}
+    await owner.settle("a1")
+    await running

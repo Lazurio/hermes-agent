@@ -304,6 +304,23 @@ class Overlay(unittest.TestCase):
         viewer = read("acp_adapter/gateway_server.py")
         self.assertIn("class GatewayACPAgent(LazurioActiveSteerMixin,", viewer)
         self.assertIn("field_meta=dict(ACTIVE_STEER_META)", viewer)
+        # The owner applies a keyed steer once and advertises it (review of hermes-agent#26).
+        receipts = read("gateway/lazurio_steer_receipts.py")
+        self.assertIn('CAPABILITY = "lazurio-steer-receipts-v1"', receipts)
+        self.assertIn('KEY = "idempotency_key"', receipts)
+        for name in ("lazurio-steer-receipts-v1", "idempotency_key", "gateway/lazurio_steer_receipts.py",
+                     "gateway/session_busy_controls.py", "tests/gateway/test_lazurio_steer_receipts.py"):
+            self.assertIn(name, row.group(1))
+        for path in ("gateway/session_busy_controls.py", "gateway/session_controls.py",
+                     "tui_gateway/contracts/canonical_sessions.py"):
+            self.assertIn(path, allowlist())
+        correct = read("gateway/session_busy_controls.py")
+        self.assertIn("from gateway import lazurio_steer_receipts as lazurio_receipts", correct)
+        self.assertIn("replayed = lazurio_receipts.replay(authority, ref.session_id, params)", correct)
+        self.assertEqual(correct.count("lazurio_receipts.remember(authority, ref.session_id, params, {"), 2)
+        self.assertIn("LAZURIO_STEER_RECEIPTS]", read("gateway/session_controls.py"))
+        self.assertIn("idempotency_key: str | None = None", read("tui_gateway/contracts/canonical_sessions.py"))
+        self.assertIn('self._lazurio_owner_capabilities = tuple(descriptor.get("capabilities") or ())', viewer)
         # The viewer's prompt keeps the turn its _meta names before anything else (review of t3code#141).
         self.assertIn("    async def prompt(self, prompt, session_id, **kwargs):\n"
                       "        # Lazurio: the client's turn this prompt is for (acp_adapter/lazurio_active_steer.py).\n"
