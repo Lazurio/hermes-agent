@@ -649,6 +649,8 @@ class GatewayACPAgent(LazurioActiveSteerMixin, LazurioSilenceMixin, LazurioStopA
         return ListSessionsResponse(sessions=page, next_cursor=page[-1].session_id if len(rows) > 50 else None)
 
     async def prompt(self, prompt, session_id, **kwargs):
+        # Lazurio: the client's turn this prompt is for (acp_adapter/lazurio_active_steer.py).
+        self._lazurio_note_turn(session_id, kwargs)
         held_id, session_id = session_id, self._aliases.get(session_id, session_id)
         if session_id not in self._snapshots:
             raise GatewayClientError("not_found")
