@@ -350,5 +350,21 @@ class Overlay(unittest.TestCase):
         self.assertIn("if not grace_holds(event, effective_busy_input_mode):", inbound)
 
 
+    def test_the_native_search_row_names_its_module_hook_and_test(self):
+        """The native search row: the Codex transport's search swap rebuilds execute_code through
+        without_sandbox_search(), in the allowlisted transport the runbook names."""
+        subject = "tools: a Codex request that searches on the provider's side lists no web_search in execute_code"
+        row = re.search(rf"^\| `{re.escape(subject)}` \|(.+)\|$", RUNBOOK, re.MULTILINE)
+        assert row, "the overlay table lists the native search row"
+        for name in ("tools/lazurio_native_search.py", "agent/transports/codex.py", "_alias_wire_tools",
+                     "tests/tools/test_lazurio_native_search.py"):
+            self.assertIn(name, row.group(1))
+        self.assertIn("agent/transports/codex.py", allowlist())
+        for path in ("model_tools.py", "tools/code_execution_tool.py"):
+            self.assertNotIn(path, allowlist())
+        transport = read("agent/transports/codex.py")
+        self.assertIn("from tools.lazurio_native_search import without_sandbox_search", transport)
+        self.assertIn("response_tools = without_sandbox_search(response_tools)", transport)
+
 if __name__ == "__main__":
     unittest.main()

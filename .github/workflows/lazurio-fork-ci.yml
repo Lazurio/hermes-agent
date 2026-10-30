@@ -182,6 +182,11 @@ jobs:
             # interrupt path names the mode it tests instead of relying on the default.
             gateway/run_config_loaders.py
             tests/gateway/test_busy_photo_interrupt_once.py
+            # tools: a Codex request that searches on the provider's side lists no web_search in
+            # execute_code: _alias_wire_tools, in the step that swaps the client web_search for the
+            # server-side one, rewrites that request's execute_code description through
+            # without_sandbox_search() of tools/lazurio_native_search.py.
+            agent/transports/codex.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
           # deletion plus a new file) or changing its type always fails, allowlisted or not.
@@ -271,9 +276,11 @@ jobs:
           # watchdog), and upstream's tests of the reply seam the pairing row touches (the code's reply
           # off the event loop and what an unknown sender is told), upstream's tests of the auth
           # store loader the entitlement row touches (a store that cannot be read or parsed, and its
-          # encoding), and upstream's tests of the busy-input seams the busy default row touches (the
+          # encoding), upstream's tests of the busy-input seams the busy default row touches (the
           # mode /busy writes and reports, a routed profile's own mode, and the steer, queue and
-          # interrupt paths of a message that arrives while a turn runs).
+          # interrupt paths of a message that arrives while a turn runs), and upstream's tests of the
+          # seams the native search row touches (the Codex transport's tool swap, the execute_code
+          # schema it rebuilds, and the openai-native provider's availability).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
@@ -332,10 +339,13 @@ jobs:
             tests/tools/test_mcp_session_scope.py
             tests/tools/test_mcp_tool.py
             tests/tools/test_mcp_trust_gating.py
+            tests/agent/transports/test_codex_transport.py
+            tests/tools/test_code_execution.py
             tests/tools/test_registry.py
             tests/tools/test_snapshot_multiline_session_env_injection.py
             tests/tools/test_snapshot_session_id_leak.py
             tests/tools/test_tool_search.py
+            tests/tools/test_web_picker_active_rows.py
             tests/tui_gateway/contracts/test_generated.py
           )
           paths=()
