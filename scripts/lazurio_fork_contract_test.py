@@ -366,5 +366,20 @@ class Overlay(unittest.TestCase):
         self.assertIn("from tools.lazurio_native_search import without_sandbox_search", transport)
         self.assertIn("response_tools = without_sandbox_search(response_tools)", transport)
 
+    def test_the_web_extract_row_names_its_module_hook_and_test(self):
+        """The web_extract row: the Codex transport's search swap drops a web_extract that can never
+        extract through without_web_extract(), in the allowlisted transport the runbook names."""
+        subject = "tools: a Codex request that searches on the provider's side offers no web_extract that can never extract"
+        row = re.search(rf"^\| `{re.escape(subject)}` \|(.+)\|$", RUNBOOK, re.MULTILINE)
+        assert row, "the overlay table lists the web_extract row"
+        for name in ("tools/lazurio_web_extract.py", "agent/transports/codex.py", "_alias_wire_tools",
+                     "tests/tools/test_lazurio_web_extract.py"):
+            self.assertIn(name, row.group(1))
+        self.assertIn("agent/transports/codex.py", allowlist())
+        self.assertNotIn("tools/web_tools.py", allowlist())
+        transport = read("agent/transports/codex.py")
+        self.assertIn("from tools.lazurio_web_extract import without_web_extract", transport)
+        self.assertIn("response_tools = without_web_extract(response_tools)", transport)
+
 if __name__ == "__main__":
     unittest.main()
