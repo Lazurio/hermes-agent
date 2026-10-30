@@ -76,7 +76,7 @@ def test_buddys_codex_request_searches_server_side_and_execute_code_lists_no_web
 
     assert any(t.get("type") == "web_search" for t in tools), tools
     assert "web_search" not in described  # neither listed nor in the import example of ``code``
-    for kept in ("web_extract(urls: list[str]", "terminal(command: str", "read_file(path: str"):
+    for kept in ("terminal(command: str", "read_file(path: str"):  # web_extract: tests/tools/test_lazurio_web_extract.py
         assert kept in described
 
 

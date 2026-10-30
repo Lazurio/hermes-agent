@@ -256,6 +256,8 @@ def _alias_wire_tools(
             response_tools = [t for t in response_tools if not is_client_web_search(t)] + [{"type": "web_search"}]
             from tools.lazurio_native_search import without_sandbox_search
             response_tools = without_sandbox_search(response_tools)
+            from tools.lazurio_web_extract import without_web_extract
+            response_tools = without_web_extract(response_tools)
     # OpenCode Responses backends reserve web_search / search_files as function names (HTTP 400 "custom
     # function name 'X' is reserved", #85589). Alias them on the wire; normalize_response maps them back.
     if response_tools and _is_opencode_responses_backend(params):

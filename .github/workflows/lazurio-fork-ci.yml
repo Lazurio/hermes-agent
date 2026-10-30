@@ -184,8 +184,11 @@ jobs:
             tests/gateway/test_busy_photo_interrupt_once.py
             # tools: a Codex request that searches on the provider's side lists no web_search in
             # execute_code: _alias_wire_tools, in the step that swaps the client web_search for the
-            # server-side one, rewrites that request's execute_code description through
+            # server-side one, rebuilds that request's execute_code through
             # without_sandbox_search() of tools/lazurio_native_search.py.
+            # tools: a Codex request that searches on the provider's side offers no web_extract that
+            # can never extract: in the same step, without_web_extract() of tools/lazurio_web_extract.py
+            # drops web_extract from that request, and from its execute_code, where no backend can extract.
             agent/transports/codex.py
           )
           # Deleting an upstream file, renaming one (with rename detection off, a rename is a
@@ -280,7 +283,10 @@ jobs:
           # mode /busy writes and reports, a routed profile's own mode, and the steer, queue and
           # interrupt paths of a message that arrives while a turn runs), and upstream's tests of the
           # seams the native search row touches (the Codex transport's tool swap, the execute_code
-          # schema it rebuilds, and the openai-native provider's availability).
+          # schema it rebuilds, and the openai-native provider's availability), and upstream's tests
+          # of the seams the web_extract row reads (the web tools' config and keyless tier, which
+          # decide the extract backend, the providers' discovery before a resolution, and
+          # web_extract's own robustness).
           gate=(
             tests/acp_adapter
             tests/ci/test_workflow_job_graph.py
@@ -346,6 +352,10 @@ jobs:
             tests/tools/test_snapshot_session_id_leak.py
             tests/tools/test_tool_search.py
             tests/tools/test_web_picker_active_rows.py
+            tests/tools/test_web_extract_robustness.py
+            tests/tools/test_web_keyless_fallback.py
+            tests/tools/test_web_providers.py
+            tests/tools/test_web_tools_config.py
             tests/tui_gateway/contracts/test_generated.py
           )
           paths=()
