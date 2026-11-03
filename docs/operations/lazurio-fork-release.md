@@ -347,14 +347,16 @@ the account that dispatched the run can't approve it.
   repository, written before the run started. Inputs that differ, a commit that isn't
   the tip or a failed job are rejected with the reason; an unknown workflow,
   another dispatcher or a missing request leave the run waiting with a
-  comment. Every decision comment starts with `Run <id> attempt <n>:`. The
-  persona never dispatches, reruns or cancels a run, and never approves a
+  comment. Every decision comment starts with `Run <id> attempt <n>:`. On
+  this path the persona never dispatches, reruns or cancels a run, and never approves a
   release that contains any of its own pull requests since the previous
   release tag; it leaves that run waiting, and the Organization Admin
   decides.
 - **Transition.** Until the environment names `agentrozjedemeai` as a
   required reviewer and the persona's Environment runs a MausBot release with
-  #93, the persona's account dispatches and the Organization Admin approves
+  Lazurio/OpenMausBot#93 with `Lazurio/hermes-agent` in
+  `OMB_GITHUB_INTAKE_DEPLOYMENTS` (unset, the intake reads no repository),
+  the persona's account dispatches and the Organization Admin approves
   in GitHub (run → Review deployments → `lazurio-hermes-agent-release` →
   Approve), as before. If the release should not go out, it is rejected and
   nothing is published.
