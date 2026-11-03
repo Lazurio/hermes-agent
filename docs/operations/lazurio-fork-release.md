@@ -1,10 +1,11 @@
 # Lazurio Hermes Agent: releases
 
-Runbook for the owner of Lazurio Hermes Agent releases (the Organization
-Steward, today Pablo, `agentrozjedemeai`). The Steward prepares, reviews,
-tests and dispatches a release; the Organization Admin (Matěj,
-`immakermatty`) approves it in the GitHub environment and is the only one who
-moves `main` to a new upstream base. Plan: DEV-6676 in the Human and Machine
+Runbook for the owner of Lazurio Hermes Agent releases. The bot that owns a
+release prepares, tests and dispatches it under the Organization Admin's
+account `immakermatty`; the persona `agentrozjedemeai` approves it in the
+GitHub environment after its GitHub intake verified the logged inputs (the
+Organization Admin's decision of 2026-11-03 on Lazurio decision 0218). Only
+the Organization Admin moves `main` to a new upstream base. Plan: DEV-6676 in the Human and Machine
 Mission Control; direction: Lazurio decision 0210 point 2.
 
 `Lazurio/hermes-agent` distributes [Hermes Agent](https://github.com/NousResearch/hermes-agent)
@@ -281,6 +282,14 @@ skips them; CI runs them on Linux.
 
 ## Dispatching a release
 
+The bot that owns the release dispatches it under `immakermatty`, once the
+pre-release tests have passed. First it posts a comment on the release's
+issue that starts with `Release dispatch request:` and holds the exact
+`gh workflow run` command below with its values; then it runs that command
+unchanged. A rejected run is never repeated: fix the cause and dispatch a new
+release with a new request. A run lost to a runner failure may be re-run; the
+persona judges every attempt again against the same request.
+
 Only from `main`, and only from the commit at its tip:
 
 ```bash
@@ -318,11 +327,27 @@ gh run list --repo Lazurio/hermes-agent --workflow lazurio-release.yml --limit 1
 
 ## Approval
 
-When the first two jobs are green, the Steward asks Matěj to approve and
-sends the run link; he approves in GitHub (run → Review deployments →
-`lazurio-hermes-agent-release` → Approve). The environment has
-`prevent_self_review`, so the Steward dispatches and the Admin approves. If
-the release should not go out, the Admin rejects it and nothing is published.
+When the first two jobs are green, the run waits in
+`lazurio-hermes-agent-release`. The environment has `prevent_self_review`, so
+the account that dispatched the run can't approve it.
+
+- **The persona** gets the waiting run through its GitHub intake in Lazurio
+  MausBot (`OMB_GITHUB_INTAKE_DEPLOYMENTS` with `Lazurio/hermes-agent`,
+  Lazurio/OpenMausBot#93). It approves only when the workflow is
+  `lazurio-release.yml`, `immakermatty` dispatched it, `head_sha` is the tip
+  of `main`, every finished job succeeded and the inputs "Verify source and
+  version" logged equal the request. Inputs that differ, a commit that isn't
+  the tip or a failed job are rejected with the reason; an unknown workflow,
+  another dispatcher or a missing request leave the run waiting with a
+  comment. Every decision comment starts with `Run <id> attempt <n>:`. The
+  persona never dispatches, reruns or cancels a run, and never approves a
+  release of its own pull request; the Organization Admin decides that one.
+- **Transition.** Until the environment names `agentrozjedemeai` as a
+  required reviewer and the persona's Environment runs a MausBot release with
+  #93, the persona's account dispatches and the Organization Admin approves
+  in GitHub (run → Review deployments → `lazurio-hermes-agent-release` →
+  Approve), as before. If the release should not go out, it is rejected and
+  nothing is published.
 
 ## Verifying a published release
 
@@ -367,8 +392,8 @@ steps, in this order:
 4. **Issues** on, for the watch workflow's tracking issue and for bug
    reports (`.github/README.md`).
 5. **Release App, environment and tag ruleset** as described above;
-   environment `lazurio-hermes-agent-release` with required reviewer Matěj,
-   `prevent_self_review`, deployments from `main` only and the variable
+   environment `lazurio-hermes-agent-release` with required reviewers
+   `immakermatty` and `agentrozjedemeai`, `prevent_self_review`, deployments from `main` only and the variable
    `LAZURIO_HERMES_AGENT_RELEASE_CONTROL=reviewed-v1`. Immutable releases on.
 6. **Protect `main`**: a branch ruleset with pull requests required, merge
    method rebase only, linear history, the required checks
