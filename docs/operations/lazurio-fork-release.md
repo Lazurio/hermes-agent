@@ -283,10 +283,16 @@ skips them; CI runs them on Linux.
 ## Dispatching a release
 
 The bot that owns the release dispatches it under `immakermatty`, once the
-pre-release tests have passed. First it posts a comment on the release's
-issue that starts with `Release dispatch request:` and holds the exact
-`gh workflow run` command below with its values; then it runs that command
-unchanged. A rejected run is never repeated: fix the cause and dispatch a new
+pre-release tests have passed. If any pull request authored by
+`agentrozjedemeai` landed between the previous release tag and `source_sha`,
+it doesn't dispatch: the persona never approves its own work (Lazurio
+decision 0169 point 5) and `immakermatty` can't approve a run it dispatched,
+so the Organization Admin decides. Otherwise it first posts, as
+`immakermatty`, a comment on an issue of this repository that the release
+belongs to, starting with `Release dispatch request:` and holding the exact
+`gh workflow run` command below with its literal values (not shell
+variables); then it runs that command unchanged. Before the switch
+(Approval, Transition) the persona's account dispatches instead. A rejected run is never repeated: fix the cause and dispatch a new
 release with a new request. A run lost to a runner failure may be re-run; the
 persona judges every attempt again against the same request.
 
@@ -336,12 +342,16 @@ the account that dispatched the run can't approve it.
   Lazurio/OpenMausBot#93). It approves only when the workflow is
   `lazurio-release.yml`, `immakermatty` dispatched it, `head_sha` is the tip
   of `main`, every finished job succeeded and the inputs "Verify source and
-  version" logged equal the request. Inputs that differ, a commit that isn't
+  version" logged equal, every one of them, the request: the newest
+  `Release dispatch request:` comment by `immakermatty` on an issue of this
+  repository, written before the run started. Inputs that differ, a commit that isn't
   the tip or a failed job are rejected with the reason; an unknown workflow,
   another dispatcher or a missing request leave the run waiting with a
   comment. Every decision comment starts with `Run <id> attempt <n>:`. The
   persona never dispatches, reruns or cancels a run, and never approves a
-  release of its own pull request; the Organization Admin decides that one.
+  release that contains any of its own pull requests since the previous
+  release tag; it leaves that run waiting, and the Organization Admin
+  decides.
 - **Transition.** Until the environment names `agentrozjedemeai` as a
   required reviewer and the persona's Environment runs a MausBot release with
   #93, the persona's account dispatches and the Organization Admin approves
